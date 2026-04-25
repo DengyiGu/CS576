@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+.DS_Store
+
+# Local videos and generated tracks (see data/README.md)
+/data/input/
+/data/output/
+
+# Stitched course videos (keep README.md tracked)
+/videos_with_ad/*.mp4
+/videos_with_ad/*.mov
+/videos_with_ad/*.mkv

@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0",
+  "video_path": "/path/to/example_lecture.mp4",
+  "duration_sec": 120.0,
+  "visual": {
+    "schema_version": "1.0",
+    "modality": "visual",
+    "video_path": "/path/to/example_lecture.mp4",
+    "duration_sec": 120.0,
+    "native_fps": 30.0,
+    "fps_sampled": 2.0,
+    "frame_stride": 15,
+    "video_width": 1920,
+    "video_height": 1080,
+    "window_sec": 1.0,
+    "windows": [
+      {
+        "t0": 0.0,
+        "t1": 1.0,
+        "motion_score": 0.08,
+        "luminance_mean": 0.42,
+        "edge_density": 0.18,
+        "shot_boundary_near": true,
+        "shot_boundary_distance_sec": 0.05,
+        "palette_delta": 0.12,
+        "high_text_density": false,
+        "visual_hypothesis": "static",
+        "hypothesis_confidence": 0.62
+      },
+      {
+        "t0": 1.0,
+        "t1": 2.0,
+        "motion_score": 0.35,
+        "luminance_mean": 0.41,
+        "edge_density": 0.22,
+        "shot_boundary_near": false,
+        "shot_boundary_distance_sec": 0.45,
+        "palette_delta": 0.08,
+        "high_text_density": false,
+        "visual_hypothesis": "dynamic_talk",
+        "hypothesis_confidence": 0.55
+      }
+    ]
+  },
+  "audio_windows": [],
+  "speech_spans": []
+}
