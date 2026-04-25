@@ -9,7 +9,6 @@ The player will not pass preloaded frames or audio arrays, only the video file p
 We recommend that the algorithm returns a list[dict], where each dictionary represents a segment:
 
 [
-
     {
         "start": 0.0,
         
@@ -34,10 +33,10 @@ We recommend that the algorithm returns a list[dict], where each dictionary repr
         
         "label": "Advertisement"
     }
-    
 ]
 
 The player will use build_segment_from_payload() to convert each payload dictionary into the internal Segment format required by the player.
+
 
 Requirements:
 
@@ -52,6 +51,7 @@ Segments should not overlap
 Segments should ideally cover the entire video (avoid gaps in the timeline)
 
 label must match the predefined labels used in the player
+
 
 Current Standard Labels:
 
