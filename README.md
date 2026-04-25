@@ -28,7 +28,7 @@ The player will use build_segment_from_payload() to convert each payload diction
 
 Requirements:
 
-start and end are in seconds
+start and end are in seconds and may be decimal values. The player converts them to milliseconds for playback seeking.
 end must be greater than start
 Segments should be ordered by time
 Segments should not overlap
@@ -47,3 +47,4 @@ Transition
 Inactivity
 Filler
 
+To see how segments are generated and passed to the player, start from SegmentationWorker. It runs run_video_segmentation(video_path) in the background and emits the resulting segments back to the UI.
