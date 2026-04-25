@@ -44,37 +44,38 @@ The player will use build_segment_from_payload() to convert each payload diction
 
 Requirements:
 
-start and end are in seconds and may be decimal values. The player converts them to milliseconds for playback seeking.
+1. start and end are in seconds and may be decimal values. The player converts them to milliseconds for playback seeking.
 
-end must be greater than start
+2. end must be greater than start
 
-Segments should be ordered by time
+3. Segments should be ordered by time
 
-Segments should not overlap
+4. Segments should not overlap
 
-Segments should ideally cover the entire video (avoid gaps in the timeline)
+5. Segments should ideally cover the entire video (avoid gaps in the timeline)
 
-label must match the predefined labels used in the player
+6. label must match the predefined labels used in the player
 
 
 Current Standard Labels:
 
-Core Content
+1. Core Content
 
-Intro
+2. Intro
 
-Outro
+3. Outro
 
-Advertisement
+4. Advertisement
 
-Self-Promotion
+5. Self-Promotion
 
-Recap
+6. Recap
 
-Transition
+7. Transition
 
-Inactivity
+8. Inactivity
 
-Filler
+9. Filler
+
 
 To see how segments are generated and passed to the player, start from SegmentationWorker. It runs run_video_segmentation(video_path) in the background and emits the resulting segments back to the UI.
