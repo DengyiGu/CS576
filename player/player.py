@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
+from player_fusion import run_video_segmentation
 
 try:
     from PySide6.QtCore import QEvent, QObject, QPoint, QSignalBlocker, QSize, QThread, QTimer, Qt, Signal, QUrl
@@ -184,17 +185,6 @@ def build_even_segments(duration_seconds: float) -> list[Segment]:
         segment = build_segment_from_payload(payload, index)
         if segment is not None:
             segments.append(segment)
-    return segments
-
-
-def run_video_segmentation(video_path: Path) -> list[Segment]:
-    simulated_step_delay_seconds = 0.8
-
-    sleep(simulated_step_delay_seconds)
-    duration_seconds = probe_video_duration_seconds(video_path)
-    sleep(simulated_step_delay_seconds)
-    segments = build_even_segments(duration_seconds)
-    sleep(simulated_step_delay_seconds)
     return segments
 
 
