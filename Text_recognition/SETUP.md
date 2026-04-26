@@ -12,11 +12,11 @@ Download the local speech-to-text and text-classification models:
 python Final_project/segment_text_analyzer.py --download-model
 ```
 
-The models are stored in:
+The models are stored under the `models/` folder next to `segment_text_analyzer.py`:
 
 ```text
-Final_project/models/faster-whisper-small
-Final_project/models/distilbart-mnli-12-1
+models/faster-whisper-small
+models/distilbart-mnli-12-1
 ```
 
 After the models are downloaded, transcription and label suggestion run locally without calling the network.
