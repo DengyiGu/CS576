@@ -3,13 +3,13 @@
 Install Python dependencies:
 
 ```bash
-python -m pip install -r Final_project/requirements.txt
+python -m pip install -r Text_recognition/requirements.txt
 ```
 
 Download the local speech-to-text model:
 
 ```bash
-python Final_project/segment_text_analyzer.py --download-model
+python Text_recognition/segment_text_analyzer.py --download-model
 ```
 
 The model is stored under the `models/` folder next to `segment_text_analyzer.py`:
@@ -23,7 +23,7 @@ After the model is downloaded, transcription runs locally without calling the ne
 Optional SpeechSpan test:
 
 ```bash
-python Final_project/segment_text_analyzer.py Final_project/videos_with_ads/test_001.mp4 --language en
+python Text_recognition/segment_text_analyzer.py videos_with_ad/test_001.mp4 --language en
 ```
 
 Notes:
