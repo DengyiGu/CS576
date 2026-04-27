@@ -6,35 +6,29 @@ Install Python dependencies:
 python -m pip install -r Final_project/requirements.txt
 ```
 
-Download the local speech-to-text and text-classification models:
+Download the local speech-to-text model:
 
 ```bash
 python Final_project/segment_text_analyzer.py --download-model
 ```
 
-The models are stored under the `models/` folder next to `segment_text_analyzer.py`:
+The model is stored under the `models/` folder next to `segment_text_analyzer.py`:
 
 ```text
 models/faster-whisper-small
-models/distilbart-mnli-12-1
 ```
 
-After the models are downloaded, transcription and label suggestion run locally without calling the network.
+After the model is downloaded, transcription runs locally without calling the network.
 
-Optional transcription test:
-
-```bash
-python Final_project/segment_text_analyzer.py Final_project/videos_with_ads/test_001.mp4 --ranges-json "[[0, 8]]" --language en
-```
-
-Optional label suggestion test:
+Optional SpeechSpan test:
 
 ```bash
-python Final_project/segment_text_analyzer.py Final_project/videos_with_ads/test_001.mp4 --ranges-json "[[0, 8]]" --suggest-labels --language en
+python Final_project/segment_text_analyzer.py Final_project/videos_with_ads/test_001.mp4 --language en
 ```
 
 Notes:
 
 - `faster-whisper` is used for offline speech-to-text.
-- `transformers`, `torch`, and `torchvision` are used for offline zero-shot text classification support. `torch>=2.6` is required for loading local PyTorch model weights safely.
-- `huggingface_hub` is only needed to download the models during setup.
+- `pydantic` is required because the shared fusion schema defines `SpeechSpan` with Pydantic.
+- `huggingface_hub` is only needed to download the model during setup.
+- `build_speech_spans(video_path)` returns `list[SpeechSpan]`, where each item has `t0`, `t1`, and `text`.
