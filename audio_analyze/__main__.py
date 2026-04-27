@@ -8,6 +8,12 @@ Stand-alone audio track JSON::
         --video data/input/test_001.mp4 \\
         --out data/output/test_001_audio_track.json
 
+Re-run the audio analysis on a pre-extracted WAV (no ffmpeg)::
+
+    python -m audio_analyze \\
+        --audio-in data/intermediate/test_001.wav \\
+        --out data/output/test_001_audio_track.json
+
 Merge audio windows into an existing AnalysisBundle (visual already inside)::
 
     python -m audio_analyze \\
@@ -36,7 +42,11 @@ from audio.analyze import analyze_audio, audio_windows_to_payload, write_audio_t
 from schemas.modality import AnalysisBundle, AudioWindow, SpeechSpan
 
 
-def _resolve_input_video(args: argparse.Namespace) -> Path:
+def _resolve_input_video(args: argparse.Namespace) -> Path | None:
+    """Return the resolved video path, or None when running from --audio-in."""
+    if args.audio_in is not None:
+        return None
+
     if args.video is not None:
         path = Path(args.video).expanduser().resolve(strict=False)
         if not path.is_file():
@@ -61,6 +71,16 @@ def _resolve_input_video(args: argparse.Namespace) -> Path:
             print(f"  {entry}", file=sys.stderr)
         raise SystemExit(2)
     return video
+
+
+def _resolve_audio_in(args: argparse.Namespace) -> Path | None:
+    if args.audio_in is None:
+        return None
+    path = Path(args.audio_in).expanduser().resolve(strict=False)
+    if not path.is_file():
+        print(f"Error: --audio-in file not found: {path}", file=sys.stderr)
+        raise SystemExit(2)
+    return path
 
 
 def _maybe_load_bundle(bundle_in: Path | None) -> AnalysisBundle | None:
@@ -112,6 +132,15 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Path to video_info/*.json (uses --videos-root to resolve the .mp4).",
+    )
+    src.add_argument(
+        "--audio-in",
+        type=Path,
+        default=None,
+        help=(
+            "Pre-extracted mono PCM WAV (skip ffmpeg). Cannot be combined with "
+            "--with-speech, which still requires the source video."
+        ),
     )
     parser.add_argument(
         "--videos-root",
@@ -174,15 +203,37 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     video = _resolve_input_video(args)
+    audio_in = _resolve_audio_in(args)
+
+    if args.with_speech and video is None:
+        print(
+            "Error: --with-speech requires a source video (use --video or --video-info, "
+            "not --audio-in alone).",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if audio_in is not None and args.keep_wav is not None:
+        print(
+            "Error: --keep-wav has no effect with --audio-in (no extraction is performed).",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    source_label = video if video is not None else audio_in
+    source_stem = (video or audio_in).stem  # type: ignore[union-attr]
 
     if args.out is None and args.bundle_out is None and args.bundle_in is None:
         default_dir = Path("data/output")
         default_dir.mkdir(parents=True, exist_ok=True)
-        args.out = default_dir / f"{video.stem}_audio_track.json"
+        args.out = default_dir / f"{source_stem}_audio_track.json"
 
-    print(f"[audio] Extracting audio features from {video} …", file=sys.stderr)
+    if audio_in is not None:
+        print(f"[audio] Reading pre-extracted WAV {audio_in} …", file=sys.stderr)
+    else:
+        print(f"[audio] Extracting audio features from {video} …", file=sys.stderr)
     windows, duration_sec = analyze_audio(
-        video,
+        video_path=video,
+        audio_in=audio_in,
         window_sec=args.window_sec,
         sample_rate=args.sample_rate,
         keep_wav=args.keep_wav,
@@ -191,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
 
     speech_spans: list[SpeechSpan] = []
     if args.with_speech:
+        assert video is not None  # guarded above
         print(f"[audio] Transcribing with faster-whisper (language={args.language})…", file=sys.stderr)
         speech_spans = _run_speech_to_text(
             video,
@@ -203,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         write_audio_track_json(
             windows,
             args.out.expanduser().resolve(),
-            video_path=video,
+            video_path=source_label or "",
             duration_sec=duration_sec,
             window_sec=args.window_sec,
         )
@@ -213,15 +265,15 @@ def main(argv: list[str] | None = None) -> int:
         bundle = _maybe_load_bundle(args.bundle_in)
         if bundle is None:
             bundle = AnalysisBundle(
-                video_path=str(video),
+                video_path=str(source_label or ""),
                 duration_sec=duration_sec,
                 visual=None,
                 audio_windows=[],
                 speech_spans=[],
             )
         else:
-            if not bundle.video_path:
-                bundle.video_path = str(video)
+            if not bundle.video_path and source_label is not None:
+                bundle.video_path = str(source_label)
             if not bundle.duration_sec:
                 bundle.duration_sec = duration_sec
 

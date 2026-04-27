@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import wave
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from audio.analyze import (
+    analyze_audio,
     audio_windows_to_payload,
     build_audio_windows,
     write_audio_track_json,
@@ -151,3 +153,43 @@ def test_audio_window_schema_accepts_extras() -> None:
     dumped = window.model_dump()
     assert dumped["audio_label"] == "silence"
     assert dumped["energy_rms"] == pytest.approx(0.01)
+
+
+def _write_mono_pcm_wav(path: Path, samples: np.ndarray, sr: int = _SR) -> None:
+    pcm = np.clip(samples, -1.0, 1.0)
+    pcm_int16 = (pcm * 32767.0).astype(np.int16)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sr)
+        handle.writeframes(pcm_int16.tobytes())
+
+
+def test_analyze_audio_audio_in_skips_ffmpeg(tmp_path: Path) -> None:
+    samples = np.concatenate([_silence(1.0), _formant_speech_like(2.0), _white_noise(1.0)])
+    wav_path = tmp_path / "synthetic.wav"
+    _write_mono_pcm_wav(wav_path, samples)
+
+    direct = build_audio_windows(samples, _SR, window_sec=1.0)
+    via_wav, duration_sec = analyze_audio(audio_in=wav_path, window_sec=1.0)
+
+    assert duration_sec == pytest.approx(samples.size / _SR, abs=1e-3)
+    assert len(via_wav) == len(direct)
+    for a, b in zip(direct, via_wav):
+        assert a.model_extra is not None
+        assert b.model_extra is not None
+        assert a.model_extra["audio_label"] == b.model_extra["audio_label"]
+        assert a.model_extra["energy_rms"] == pytest.approx(
+            b.model_extra["energy_rms"], abs=1e-3
+        )
+
+
+def test_analyze_audio_requires_exactly_one_source(tmp_path: Path) -> None:
+    wav_path = tmp_path / "tiny.wav"
+    _write_mono_pcm_wav(wav_path, _silence(0.5))
+    with pytest.raises(ValueError):
+        analyze_audio()
+    with pytest.raises(ValueError):
+        analyze_audio(video_path=wav_path, audio_in=wav_path)
+    with pytest.raises(FileNotFoundError):
+        analyze_audio(audio_in=tmp_path / "missing.wav")

@@ -388,27 +388,43 @@ def build_audio_windows(
 
 
 def analyze_audio(
-    video_path: Path | str,
+    video_path: Path | str | None = None,
     *,
     window_sec: float = 1.0,
     sample_rate: int = _DEFAULT_SAMPLE_RATE,
     keep_wav: Path | None = None,
+    audio_in: Path | str | None = None,
 ) -> tuple[list[AudioWindow], float]:
-    """Extract audio from ``video_path`` and return windowed features + duration."""
-    path = Path(video_path).expanduser().resolve(strict=False)
-    if not path.is_file():
-        raise FileNotFoundError(str(path))
+    """Return per-window features and duration for a video or pre-extracted WAV.
 
-    if keep_wav is not None:
-        wav_path = Path(keep_wav).expanduser().resolve(strict=False)
-        wav_path.parent.mkdir(parents=True, exist_ok=True)
-        _ffmpeg_extract_wav(path, wav_path, sample_rate)
+    Provide exactly one of ``video_path`` or ``audio_in``. ``audio_in`` skips
+    ffmpeg entirely and reads a mono PCM WAV directly, matching the planning
+    doc's pipeline step 1 ("Frames + audio file") so step 2 can be re-run
+    without re-demuxing.
+    """
+    if (video_path is None) == (audio_in is None):
+        raise ValueError("Provide exactly one of video_path or audio_in.")
+
+    if audio_in is not None:
+        wav_path = Path(audio_in).expanduser().resolve(strict=False)
+        if not wav_path.is_file():
+            raise FileNotFoundError(str(wav_path))
         samples, sr = _read_wav_mono(wav_path)
     else:
-        with tempfile.TemporaryDirectory(prefix="audio_analyze_") as tmpdir:
-            wav_path = Path(tmpdir) / f"{path.stem}.wav"
+        path = Path(video_path).expanduser().resolve(strict=False)
+        if not path.is_file():
+            raise FileNotFoundError(str(path))
+
+        if keep_wav is not None:
+            wav_path = Path(keep_wav).expanduser().resolve(strict=False)
+            wav_path.parent.mkdir(parents=True, exist_ok=True)
             _ffmpeg_extract_wav(path, wav_path, sample_rate)
             samples, sr = _read_wav_mono(wav_path)
+        else:
+            with tempfile.TemporaryDirectory(prefix="audio_analyze_") as tmpdir:
+                wav_path = Path(tmpdir) / f"{path.stem}.wav"
+                _ffmpeg_extract_wav(path, wav_path, sample_rate)
+                samples, sr = _read_wav_mono(wav_path)
 
     duration_sec = float(samples.size) / float(sr) if sr > 0 else 0.0
     audio_windows = build_audio_windows(samples, sr, window_sec=window_sec)
