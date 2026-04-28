@@ -41,8 +41,6 @@ video path        Required for transcription. Path to the local video file.
 --language        Transcription language code. Default: en.
 --vad             Enables voice activity detection. Default: off. VAD can speed up transcription by skipping non-speech sections, but it may miss some imformation. Leave it off when accuracy is more important.
 --model-dir       Optional custom directory for the selected local model. The default directory is:
-
-```text
 Automatic_speech_recognition/models/faster-whisper-<model>
 ```
 
