@@ -227,3 +227,6 @@ __marimo__/
 /videos_with_ad/*.mp4
 /videos_with_ad/*.mov
 /videos_with_ad/*.mkv
+
+# Local ASR models are downloaded during setup and should not be committed
+/Automatic_speech_recognition/models/

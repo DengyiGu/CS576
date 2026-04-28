@@ -146,7 +146,7 @@ def build_segment_from_payload(payload: dict[str, Any], index: int) -> Segment |
     )
 
 
-def build_even_segments(duration_seconds: float) -> list[Segment]:
+def build_full_content_segment(duration_seconds: float) -> list[Segment]:
     if duration_seconds <= 0:
         raise ValueError("Video duration must be positive before building segments.")
 
@@ -189,24 +189,23 @@ def build_even_segments(duration_seconds: float) -> list[Segment]:
 
 
 def probe_video_duration_seconds(path: Path) -> float:
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(path),
-    ]
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=True,
+    duration_seconds = float(
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
     )
-    duration_text = completed.stdout.strip()
-    duration_seconds = float(duration_text)
     if duration_seconds <= 0:
         raise ValueError(f"Unable to determine a positive duration for {path.name}.")
     return duration_seconds
