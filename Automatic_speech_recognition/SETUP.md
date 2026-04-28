@@ -81,5 +81,4 @@ Notes:
 - `pydantic` is required because the shared fusion schema defines `SpeechSpan` with Pydantic.
 - `huggingface_hub` is only needed to download the selected model during setup.
 - `build_speech_spans(video_path)` returns `list[SpeechSpan]`, where each item has `t0`, `t1`, and `text`.
-- Function calls can use `model_name="tiny"`, `"base"`, `"small"`, `"medium"`, or `"large-v3"`.
-- Function calls can also use `compute_type="int8"` or another faster-whisper CPU compute type when needed.
+
