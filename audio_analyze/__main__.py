@@ -28,7 +28,21 @@ End-to-end (audio + speech) using ``video_info`` descriptors::
         --videos-root data/input \\
         --bundle-in data/output/test_001_analysis_bundle.json \\
         --bundle-out data/output/test_001_analysis_bundle.json \\
-        --with-speech --language en
+        --with-speech --model small --language en
+
+Faster speech pass with VAD on (skips silent regions)::
+
+    python -m audio_analyze \\
+        --video data/input/test_001.mp4 \\
+        --bundle-in data/output/test_001_analysis_bundle.json \\
+        --bundle-out data/output/test_001_analysis_bundle.json \\
+        --with-speech --model small --vad
+
+Speech recognition uses ``Automatic_speech_recognition/segment_text_analyzer.py``;
+download the selected model first with::
+
+    python Automatic_speech_recognition/segment_text_analyzer.py \\
+        --download-model --model small
 """
 
 from __future__ import annotations
@@ -93,20 +107,32 @@ def _maybe_load_bundle(bundle_in: Path | None) -> AnalysisBundle | None:
     return AnalysisBundle.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def _run_speech_to_text(video: Path, *, language: str | None, model_dir: Path | None) -> list[SpeechSpan]:
+def _run_speech_to_text(
+    video: Path,
+    *,
+    model_name: str,
+    model_dir: Path | None,
+    compute_type: str,
+    language: str | None,
+    vad: bool,
+) -> list[SpeechSpan]:
     try:
-        from Text_recognition.segment_text_analyzer import (
-            DEFAULT_WHISPER_MODEL_DIR,
-            build_speech_spans,
-        )
+        from Automatic_speech_recognition.segment_text_analyzer import build_speech_spans
     except ImportError as exc:
         raise RuntimeError(
-            "Speech extraction requires Text_recognition/. Ensure 'Text_recognition' is on "
-            "PYTHONPATH and faster-whisper is installed."
+            "Speech extraction requires Automatic_speech_recognition/. Ensure the package "
+            "is on PYTHONPATH and faster-whisper is installed (see "
+            "Automatic_speech_recognition/SETUP.md)."
         ) from exc
 
-    target_dir = model_dir if model_dir is not None else DEFAULT_WHISPER_MODEL_DIR
-    return build_speech_spans(video, model_dir=Path(target_dir), language=language)
+    return build_speech_spans(
+        video,
+        model_name=model_name,
+        model_dir=model_dir,
+        compute_type=compute_type,
+        language=language,
+        vad=vad,
+    )
 
 
 def _summarize(windows: list[AudioWindow]) -> str:
@@ -190,15 +216,34 @@ def main(argv: list[str] | None = None) -> int:
         help="Also transcribe with faster-whisper and fill speech_spans on the bundle.",
     )
     parser.add_argument(
+        "--model",
+        choices=("tiny", "base", "small", "medium", "large-v3"),
+        default="small",
+        help="faster-whisper model size used when --with-speech is set (default: small).",
+    )
+    parser.add_argument(
+        "--vad",
+        action="store_true",
+        help="Enable faster-whisper voice activity detection to skip non-speech audio.",
+    )
+    parser.add_argument(
+        "--compute-type",
+        default="int8",
+        help="faster-whisper CPU compute type (default: int8). Common: int8, int16, float32.",
+    )
+    parser.add_argument(
         "--language",
-        default=None,
-        help="Optional language code passed to faster-whisper (e.g. 'en').",
+        default="en",
+        help="Language code passed to faster-whisper (default: en).",
     )
     parser.add_argument(
         "--whisper-model-dir",
+        "--model-dir",
+        dest="whisper_model_dir",
         type=Path,
         default=None,
-        help="Override the local faster-whisper model directory.",
+        help="Override the local faster-whisper model directory (defaults to "
+             "Automatic_speech_recognition/models/faster-whisper-<model>).",
     )
     args = parser.parse_args(argv)
 
@@ -243,11 +288,18 @@ def main(argv: list[str] | None = None) -> int:
     speech_spans: list[SpeechSpan] = []
     if args.with_speech:
         assert video is not None  # guarded above
-        print(f"[audio] Transcribing with faster-whisper (language={args.language})…", file=sys.stderr)
+        print(
+            f"[audio] Transcribing with faster-whisper (model={args.model}, "
+            f"compute={args.compute_type}, vad={args.vad}, language={args.language})…",
+            file=sys.stderr,
+        )
         speech_spans = _run_speech_to_text(
             video,
-            language=args.language,
+            model_name=args.model,
             model_dir=args.whisper_model_dir,
+            compute_type=args.compute_type,
+            language=args.language,
+            vad=args.vad,
         )
         print(f"[audio] Got {len(speech_spans)} speech spans", file=sys.stderr)
 
