@@ -1,5 +1,25 @@
 """
+player_fusion_patch.py
+-----------------------
 Drop-in replacement for run_video_segmentation() in player/player.py.
+
+HOW TO INTEGRATE
+----------------
+In player/player.py, replace the existing run_video_segmentation function:
+
+    def run_video_segmentation(video_path: Path) -> list[Segment]:
+        simulated_step_delay_seconds = 0.8
+        sleep(simulated_step_delay_seconds)
+        ...
+        segments = build_even_segments(duration_seconds)   # ← fake
+        ...
+        return segments
+
+With this single import + call:
+
+    from player_fusion_patch import run_video_segmentation
+
+Or copy-paste the function body directly into player.py.
 
 LOOKUP ORDER
 ------------
@@ -16,6 +36,7 @@ build_even_segments() so it never crashes.
 """
 
 from __future__ import annotations
+
 import json
 import sys
 from dataclasses import dataclass
@@ -23,6 +44,10 @@ from pathlib import Path
 from typing import Any
 
 
+# ---------------------------------------------------------------------------
+# Segment dataclass (mirrors the one in player.py — imported if available,
+# otherwise re-defined here so this file is independently usable)
+# ---------------------------------------------------------------------------
 try:
     from player.player import Segment, build_segment_from_payload, build_even_segments, probe_video_duration_seconds
     _PLAYER_IMPORTS_OK = True
@@ -43,7 +68,10 @@ except ImportError:
             return max(0.0, self.end - self.start)
 
 
+# ---------------------------------------------------------------------------
 # Candidate locations for a pre-computed segments file
+# ---------------------------------------------------------------------------
+
 def _find_segments_file(video_path: Path) -> Path | None:
     stem = video_path.stem
     candidates = [
@@ -60,7 +88,10 @@ def _find_segments_file(video_path: Path) -> Path | None:
     return None
 
 
+# ---------------------------------------------------------------------------
 # Load segments from a pre-computed segments JSON
+# ---------------------------------------------------------------------------
+
 def _load_segments_from_json(path: Path) -> list[Segment]:
     data = json.loads(path.read_text(encoding="utf-8"))
     raw_segments: list[dict[str, Any]] = data.get("segments", [])
@@ -72,7 +103,10 @@ def _load_segments_from_json(path: Path) -> list[Segment]:
     return segments
 
 
+# ---------------------------------------------------------------------------
 # Run fusion live (visual analysis + fuse)
+# ---------------------------------------------------------------------------
+
 def _run_fusion_live(video_path: Path) -> list[Segment]:
     from visual.analyze import build_analysis_bundle
     from fusion.fuse import fuse_bundle_to_segments
@@ -80,10 +114,19 @@ def _run_fusion_live(video_path: Path) -> list[Segment]:
     print(f"[fusion] Running visual analysis on {video_path.name} …", file=sys.stderr)
     bundle = build_analysis_bundle(video_path)
 
+    # Wire in speech recognition if the module is available
+    try:
+        from Automatic_speech_recognition.segment_text_analyzer import build_speech_spans
+        print(f"[fusion] Running speech recognition on {video_path.name} …", file=sys.stderr)
+        bundle.speech_spans = build_speech_spans(video_path)
+        print(f"[fusion] Got {len(bundle.speech_spans)} speech spans.", file=sys.stderr)
+    except Exception as e:
+        print(f"[fusion] Speech recognition unavailable, skipping: {e}", file=sys.stderr)
+
     print(f"[fusion] Fusing {len(bundle.visual.windows)} windows …", file=sys.stderr)
     raw_segments = fuse_bundle_to_segments(bundle)
 
-    # Optionally persist for next time
+    # Persist for next time
     out_dir = Path("data/output")
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -102,9 +145,15 @@ def _run_fusion_live(video_path: Path) -> list[Segment]:
     return segments
 
 
+# ---------------------------------------------------------------------------
 # Public entry point — replaces run_video_segmentation in player.py
+# ---------------------------------------------------------------------------
+
 def run_video_segmentation(video_path: Path) -> list[Segment]:
     """
+    Replacement for the stub run_video_segmentation() in player/player.py.
+
+    Priority:
       1. Load pre-computed segments.json if it exists next to the video
          or in data/output/.
       2. Otherwise, run visual analysis + fusion live and cache the result.
