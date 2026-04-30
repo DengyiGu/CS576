@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
+from player_fusion import run_video_segmentation
 
 try:
     from PySide6.QtCore import QEvent, QObject, QPoint, QSignalBlocker, QSize, QThread, QTimer, Qt, Signal, QUrl
@@ -145,78 +146,40 @@ def build_segment_from_payload(payload: dict[str, Any], index: int) -> Segment |
     )
 
 
-def build_even_segments(duration_seconds: float) -> list[Segment]:
+def build_full_content_segment(duration_seconds: float) -> list[Segment]:
     if duration_seconds <= 0:
         raise ValueError("Video duration must be positive before building segments.")
 
-    segments: list[Segment] = []
-    demo_label_order = [
-        "Intro",
-        "Core Content",
-        "Advertisement",
-        "Core Content",
-        "Recap",
-        "Core Content",
-        "Transition",
-        "Core Content",
-        "Self-Promotion",
-        "Core Content",
-        "Inactivity",
-        "Core Content",
-        "Filler",
-        "Outro",
-    ]
-    total_labels = len(demo_label_order)
-    for index, label_name in enumerate(demo_label_order):
-        item = taxonomy_item_for_label(label_name)
-        if item is None:
-            raise ValueError(f"Unknown demo segment label: {label_name}")
-        start = duration_seconds * index / total_labels
-        end = duration_seconds * (index + 1) / total_labels
-        payload = {
-            "id": f"segment-{index}",
-            "start": start,
-            "end": end,
-            "label": item["label"],
-            "kind": item["kind"],
-            "color": item["color"],
-        }
-        segment = build_segment_from_payload(payload, index)
-        if segment is not None:
-            segments.append(segment)
-    return segments
-
-
-def run_video_segmentation(video_path: Path) -> list[Segment]:
-    simulated_step_delay_seconds = 0.8
-
-    sleep(simulated_step_delay_seconds)
-    duration_seconds = probe_video_duration_seconds(video_path)
-    sleep(simulated_step_delay_seconds)
-    segments = build_even_segments(duration_seconds)
-    sleep(simulated_step_delay_seconds)
-    return segments
+    segment = build_segment_from_payload(
+        {
+            "id": "segment-0",
+            "start": 0.0,
+            "end": duration_seconds,
+            "label": "Core Content",
+        },
+        0,
+    )
+    return [segment] if segment is not None else []
 
 
 def probe_video_duration_seconds(path: Path) -> float:
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        str(path),
-    ]
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=True,
+    duration_seconds = float(
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
     )
-    duration_text = completed.stdout.strip()
-    duration_seconds = float(duration_text)
     if duration_seconds <= 0:
         raise ValueError(f"Unable to determine a positive duration for {path.name}.")
     return duration_seconds
