@@ -112,19 +112,33 @@ def _normalize_robust(values: list[float], low_q: float = 0.1, high_q: float = 0
     return res
 
 
+_HIST_BINS = [8, 8, 8]      # 8x8x8 = 512 elements
+_HIST_SIZE = 8 * 8 * 8      # must match _HIST_BINS product
+_HIST_RANGES = [0, 256] * 3
+
+
 def _small_bgr_hist(bgr: np.ndarray) -> np.ndarray:
     h, w = bgr.shape[:2]
+    # Always return _HIST_SIZE-element array so _hist_distance never sees
+    # a shape mismatch. Previously returned np.zeros(24) for tiny frames
+    # while normal frames returned 512 elements — that mismatch caused the
+    # cv2.compareHist assertion error.
     if h < 2 or w < 2:
-        return np.zeros(24, dtype=np.float64)
+        return np.zeros(_HIST_SIZE, dtype=np.float64)
     small = cv2.resize(bgr, (32, 32), interpolation=cv2.INTER_AREA)
-    hist_size = [8, 8, 8]
-    ranges = [0, 256] * 3
-    hist = cv2.calcHist([small], [0, 1, 2], None, hist_size, ranges)
+    hist = cv2.calcHist([small], [0, 1, 2], None, _HIST_BINS, _HIST_RANGES)
     hist = cv2.normalize(hist, None).flatten()
-    return hist.astype(np.float64)
+    arr = hist.astype(np.float64)
+    # Defensive: ensure exactly _HIST_SIZE elements regardless of cv2 version
+    if arr.size != _HIST_SIZE:
+        arr = np.zeros(_HIST_SIZE, dtype=np.float64)
+    return arr
 
 
 def _hist_distance(a: np.ndarray, b: np.ndarray) -> float:
+    # Guard against any remaining shape mismatch — return 0.0 (no divergence)
+    if a.shape != b.shape:
+        return 0.0
     return float(cv2.compareHist(a.astype(np.float32), b.astype(np.float32), cv2.HISTCMP_BHATTACHARYYA))
 
 
@@ -223,8 +237,7 @@ def _compute_window_raw(
     motion_raw = float(np.mean(motions)) if motions else 0.0
     lum_mean = float(np.mean(lums)) if lums else 0.0
     edge_mean = float(np.mean(edges)) if edges else 0.0
-    mean_hist = (hist_sum / max(1, hist_count)) if hist_sum is not None else np.zeros(24, dtype=np.float64)
-
+    mean_hist = (hist_sum / max(1, hist_count)) if hist_sum is not None else np.zeros(_HIST_SIZE, dtype=np.float64)
     if hist_ema is None:
         palette_vs_ema = 0.0
     else:

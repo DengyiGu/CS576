@@ -150,16 +150,42 @@ def build_full_content_segment(duration_seconds: float) -> list[Segment]:
     if duration_seconds <= 0:
         raise ValueError("Video duration must be positive before building segments.")
 
-    segment = build_segment_from_payload(
-        {
-            "id": "segment-0",
-            "start": 0.0,
-            "end": duration_seconds,
-            "label": "Core Content",
-        },
-        0,
-    )
-    return [segment] if segment is not None else []
+    segments: list[Segment] = []
+    demo_label_order = [
+        "Intro",
+        "Core Content",
+        "Advertisement",
+        "Core Content",
+        "Recap",
+        "Core Content",
+        "Transition",
+        "Core Content",
+        "Self-Promotion",
+        "Core Content",
+        "Inactivity",
+        "Core Content",
+        "Filler",
+        "Outro",
+    ]
+    total_labels = len(demo_label_order)
+    for index, label_name in enumerate(demo_label_order):
+        item = taxonomy_item_for_label(label_name)
+        if item is None:
+            raise ValueError(f"Unknown demo segment label: {label_name}")
+        start = duration_seconds * index / total_labels
+        end = duration_seconds * (index + 1) / total_labels
+        payload = {
+            "id": f"segment-{index}",
+            "start": start,
+            "end": end,
+            "label": item["label"],
+            "kind": item["kind"],
+            "color": item["color"],
+        }
+        segment = build_segment_from_payload(payload, index)
+        if segment is not None:
+            segments.append(segment)
+    return segments
 
 
 def probe_video_duration_seconds(path: Path) -> float:
