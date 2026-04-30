@@ -19,13 +19,13 @@ Usage
 Metrics:
   Temporal Precision — of all the time we predicted as "ad", what fraction actually was an ad?
 
-  Temporal Recall    — of all actual ad time, what fraction did we catch?
+  Temporal Recall — of all actual ad time, what fraction did we catch?
 
-  F1                 — harmonic mean of precision and recall
+  F1 — harmonic mean of precision and recall
 
-  Mean Segment IoU   — for each predicted ad segment, the max overlap with any reference ad, 
-                       averaged across predictions. This measures how well individual segment
-                       boundaries are localised, not just whether ad time was found.
+  Mean Segment IoU — for each predicted ad segment, the max overlap with any reference ad, 
+                     averaged across predictions. This measures how well individual segment
+                     boundaries are localised, not just whether ad time was found.
 """
 
 from __future__ import annotations

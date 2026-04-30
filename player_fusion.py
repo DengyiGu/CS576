@@ -1,10 +1,8 @@
 """
-player_fusion_patch.py
------------------------
+
 Drop-in replacement for run_video_segmentation() in player/player.py.
 
 HOW TO INTEGRATE
-----------------
 In player/player.py, replace the existing run_video_segmentation function:
 
     def run_video_segmentation(video_path: Path) -> list[Segment]:
@@ -22,7 +20,6 @@ With this single import + call:
 Or copy-paste the function body directly into player.py.
 
 LOOKUP ORDER
-------------
 When a video is loaded, the player looks for a pre-computed segments file
 in the following order:
 
@@ -44,10 +41,8 @@ from pathlib import Path
 from typing import Any
 
 
-# ---------------------------------------------------------------------------
 # Segment dataclass (mirrors the one in player.py — imported if available,
 # otherwise re-defined here so this file is independently usable)
-# ---------------------------------------------------------------------------
 try:
     from player.player import Segment, build_segment_from_payload, build_even_segments, probe_video_duration_seconds
     _PLAYER_IMPORTS_OK = True
@@ -68,9 +63,7 @@ except ImportError:
             return max(0.0, self.end - self.start)
 
 
-# ---------------------------------------------------------------------------
 # Candidate locations for a pre-computed segments file
-# ---------------------------------------------------------------------------
 
 def _find_segments_file(video_path: Path) -> Path | None:
     stem = video_path.stem
@@ -88,9 +81,7 @@ def _find_segments_file(video_path: Path) -> Path | None:
     return None
 
 
-# ---------------------------------------------------------------------------
 # Load segments from a pre-computed segments JSON
-# ---------------------------------------------------------------------------
 
 def _load_segments_from_json(path: Path) -> list[Segment]:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -103,9 +94,7 @@ def _load_segments_from_json(path: Path) -> list[Segment]:
     return segments
 
 
-# ---------------------------------------------------------------------------
 # Run fusion live (visual analysis + fuse)
-# ---------------------------------------------------------------------------
 
 def _run_fusion_live(video_path: Path) -> list[Segment]:
     from visual.analyze import build_analysis_bundle
@@ -145,9 +134,7 @@ def _run_fusion_live(video_path: Path) -> list[Segment]:
     return segments
 
 
-# ---------------------------------------------------------------------------
 # Public entry point — replaces run_video_segmentation in player.py
-# ---------------------------------------------------------------------------
 
 def run_video_segmentation(video_path: Path) -> list[Segment]:
     """
