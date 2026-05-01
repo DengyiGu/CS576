@@ -34,31 +34,11 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
-# Segment dataclass (mirrors the one in player.py — imported if available, otherwise re-defined here so this 
-# file is independently usable)
-try:
-    from player.player import Segment, build_segment_from_payload, build_full_content_segment, probe_video_duration_seconds
-    _PLAYER_IMPORTS_OK = True
-except ImportError:
-    _PLAYER_IMPORTS_OK = False
-
-    @dataclass
-    class Segment:  # type: ignore[no-redef]
-        identifier: str
-        start: float
-        end: float
-        label_name: str
-        kind: str
-        color: str
-
-        @property
-        def duration(self) -> float:
-            return max(0.0, self.end - self.start)
+from player.segments import Segment, build_full_content_segment, build_segment_from_payload, probe_video_duration_seconds
 
 
 # Candidate locations for a pre-computed segments file
