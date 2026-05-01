@@ -1,0 +1,158 @@
+{
+  "brands": {
+    "food_beverage": [
+      "coca-cola", "coca cola", "coke", "pepsi", "pepsi cola", "sprite", "fanta",
+      "dr pepper", "mountain dew", "snapple", "gatorade", "powerade", "red bull",
+      "monster energy", "celsius", "liquid death", "prime",
+      "starbucks", "dunkin", "dunkin donuts", "tim hortons", "peet's",
+      "mcdonald's", "mcdonalds", "burger king", "wendy's", "wendys",
+      "taco bell", "chipotle", "subway", "dominos", "domino's", "pizza hut",
+      "kfc", "chick-fil-a", "chick fil a", "shake shack", "five guys",
+      "sonic", "arby's", "arbys", "dairy queen", "popeyes", "raising cane's",
+      "doritos", "lays", "lay's", "pringles", "cheetos", "fritos",
+      "oreo", "reese's", "reeses", "kit kat", "snickers", "m&ms", "m&m",
+      "skittles", "starburst", "twix", "milky way", "hershey's", "hersheys",
+      "nature valley", "kind bar", "clif bar", "rxbar",
+      "heineken", "budweiser", "bud light", "corona", "modelo", "coors",
+      "miller lite", "guinness", "stella artois", "white claw", "truly",
+      "tropicana", "minute maid", "simply orange", "naked juice",
+      "yoplait", "chobani", "fage", "activia",
+      "hellmann's", "hellmans", "kraft", "heinz", "kellogg's", "kelloggs",
+      "general mills", "quaker", "campbells", "campbell's"
+    ],
+    "tech_electronics": [
+      "apple", "iphone", "ipad", "macbook", "airpods",
+      "samsung", "samsung galaxy", "galaxy s", "galaxy z",
+      "google", "google pixel", "pixel phone", "google home",
+      "microsoft", "surface", "xbox", "windows",
+      "sony", "playstation", "ps5", "ps4",
+      "nvidia", "intel", "amd", "qualcomm",
+      "lg", "lenovo", "dell", "hp", "asus", "acer", "razer",
+      "amazon", "amazon echo", "alexa", "amazon fire", "kindle",
+      "meta", "oculus", "quest", "meta quest",
+      "bose", "jbl", "beats", "sennheiser", "sonos",
+      "dyson", "roomba", "irobot", "ring", "nest",
+      "gopro", "canon", "nikon", "fujifilm"
+    ],
+    "streaming_software": [
+      "netflix", "hulu", "disney plus", "disney+", "hbo max", "max",
+      "apple tv", "apple tv plus", "peacock", "paramount plus", "paramount+",
+      "spotify", "apple music", "tidal", "soundcloud", "pandora",
+      "youtube premium", "youtube tv",
+      "adobe", "adobe creative cloud", "photoshop", "premiere",
+      "dropbox", "google drive", "microsoft 365", "office 365",
+      "slack", "zoom", "webex", "teams",
+      "audible", "kindle unlimited",
+      "skillshare", "masterclass", "coursera", "udemy", "duolingo",
+      "squarespace", "wix", "shopify", "wordpress",
+      "norton", "mcafee", "nordvpn", "expressvpn", "surfshark",
+      "dashlane", "lastpass", "1password"
+    ],
+    "retail_ecommerce": [
+      "amazon", "walmart", "target", "costco", "sam's club",
+      "ikea", "wayfair", "overstock", "etsy", "ebay",
+      "best buy", "apple store", "b&h photo",
+      "home depot", "lowe's", "lowes",
+      "bed bath beyond", "crate and barrel", "williams sonoma",
+      "nordstrom", "macy's", "macys", "bloomingdale's", "saks",
+      "gap", "old navy", "banana republic", "h&m", "zara", "uniqlo",
+      "shein", "temu", "wish",
+      "chewy", "petco", "petsmart"
+    ],
+    "automotive": [
+      "toyota", "honda", "ford", "chevrolet", "chevy", "gmc",
+      "bmw", "mercedes", "mercedes-benz", "audi", "volkswagen", "vw",
+      "tesla", "hyundai", "kia", "nissan", "subaru", "mazda",
+      "jeep", "ram", "dodge", "chrysler", "buick", "cadillac",
+      "lexus", "acura", "infiniti", "volvo", "porsche", "ferrari",
+      "lamborghini", "land rover", "range rover", "jaguar",
+      "geico", "progressive", "state farm", "allstate", "liberty mutual",
+      "farmers insurance", "nationwide", "usaa",
+      "enterprise", "hertz", "avis", "budget car rental",
+      "uber", "lyft", "waymo"
+    ],
+    "finance_banking": [
+      "chase", "jpmorgan", "bank of america", "wells fargo", "citibank",
+      "capital one", "discover", "american express", "amex",
+      "mastercard", "visa", "paypal", "venmo", "zelle", "cash app",
+      "fidelity", "vanguard", "schwab", "robinhood", "coinbase",
+      "sofi", "chime", "ally bank",
+      "h&r block", "turbotax", "quickbooks"
+    ],
+    "health_beauty_fashion": [
+      "dove", "nivea", "neutrogena", "cetaphil", "cerave",
+      "olay", "l'oreal", "loreal", "maybelline", "revlon", "covergirl",
+      "clinique", "estee lauder", "lancome", "mac cosmetics",
+      "gillette", "schick", "harry's",
+      "colgate", "crest", "listerine", "oral-b",
+      "head and shoulders", "pantene", "herbal essences", "tresemme",
+      "old spice", "axe", "degree", "secret",
+      "nike", "adidas", "puma", "new balance", "under armour",
+      "reebok", "converse", "vans", "skechers", "crocs",
+      "lululemon", "gymshark", "fabletics",
+      "gucci", "louis vuitton", "chanel", "prada", "versace",
+      "bvlgari", "bulgari", "tiffany", "pandora jewelry",
+      "calvin klein", "ralph lauren", "tommy hilfiger", "michael kors",
+      "ray-ban", "oakley", "warby parker"
+    ],
+    "travel_hospitality": [
+      "marriott", "hilton", "hyatt", "ihg", "wyndham",
+      "airbnb", "vrbo", "booking.com", "expedia", "hotels.com",
+      "kayak", "trivago", "priceline",
+      "delta", "united", "american airlines", "southwest", "jetblue",
+      "spirit airlines", "frontier",
+      "carnival", "royal caribbean", "norwegian cruise"
+    ],
+    "telecom_internet": [
+      "verizon", "at&t", "t-mobile", "sprint", "boost mobile",
+      "comcast", "xfinity", "spectrum", "cox", "dish network",
+      "directv", "starlink"
+    ],
+    "subscription_lifestyle": [
+      "hello fresh", "hellofresh", "factor", "blue apron", "sunbasket",
+      "daily harvest", "home chef",
+      "dollar shave club", "manscaped", "native",
+      "stitch fix", "trunk club", "bombas", "quip",
+      "peloton", "mirror", "tonal",
+      "calm", "headspace", "noom", "weight watchers",
+      "ancestry", "23andme",
+      "grammarly", "honey", "rakuten"
+    ]
+  },
+  "phrases": {
+    "sponsorship": [
+      "sponsored by", "brought to you by", "use code", "use my code",
+      "promo code", "discount code", "affiliate",
+      "link in the description", "link in bio",
+      "first month free", "limited time offer", "exclusive deal",
+      "check it out", "download the app", "available now", "on sale now",
+      "scan the qr code", "click the link below", "use my link",
+      "try it free", "sign up today", "get started today"
+    ],
+    "self_promotion": [
+      "subscribe", "hit the bell", "like and subscribe",
+      "don't forget to subscribe", "follow me", "follow us",
+      "patreon", "merch", "my discord", "join the discord",
+      "become a member", "join the channel", "support the channel",
+      "smash that like button", "turn on notifications"
+    ],
+    "outro": [
+      "thanks for watching", "see you next time", "see you in the next",
+      "until next time", "that's all for today", "that's it for today",
+      "goodbye", "bye for now", "see you soon", "peace out",
+      "that's a wrap", "catch you later", "signing off"
+    ],
+    "intro": [
+      "welcome back", "welcome to", "in today's video", "in this video",
+      "today we", "today i'm going to", "today we're going to",
+      "let's get started", "let's dive in", "what's up everybody",
+      "hey guys", "hey everyone", "what is up", "good morning",
+      "good evening", "hello everyone", "hello everybody"
+    ],
+    "recap": [
+      "last time", "last episode", "previously", "as we discussed",
+      "as i mentioned", "in the previous", "recap", "to recap",
+      "as you may remember", "if you missed", "in case you missed"
+    ]
+  }
+}
