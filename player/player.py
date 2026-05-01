@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from time import monotonic
 from typing import Any
-from player.segments import EPSILON_SECONDS, TIMELINE_TRACK_SIDE_PADDING, TAXONOMY, Segment, build_segment_from_payload
+from player.segments import EPSILON_SECONDS, TIMELINE_TRACK_SIDE_PADDING, Segment
 from player_fusion import run_video_segmentation
 
 try:
