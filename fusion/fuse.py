@@ -3,18 +3,16 @@ Multimodal fusion layer.
 
 Takes an AnalysisBundle (visual + optional audio + optional speech) and
 produces labeled segment dicts in the shape the player expects:
-
     [{"start": 0.0, "end": 12.5, "label": "Intro", "kind": "non-content"}, ...]
 
 Works in three steps:
-1. Per-window classification: each window gets a label from visual signals,
-   with audio and speech overrides layered on top.
-2. Label smoothing: short isolated blips get absorbed into their neighbors
-   so the output is clean and doesn't flicker.
-3. Segment merging: consecutive windows with the same label collapse into
-   a single segment dict.
+1. Per-window classification: each window gets a label from visual signals, with audio and speech overrides 
+   layered on top.
+2. Label smoothing: short isolated blips get absorbed into their neighbors so the output is clean and doesn't 
+   flicker.
+3. Segment merging: consecutive windows with the same label collapse into a single segment dict.
 
-Falls back gracefully to visual-only mode when audio/speech are not available.
+Falls back to visual-only mode when audio/speech are not available.
 Teammate outputs slot in automatically once their fields are populated.
 """
 
@@ -55,63 +53,42 @@ _KIND_FOR_LABEL: dict[str, str] = {
 
 # Speech keyword detection
 #
-# After reviewing all 5 test video transcripts, the key finding was that
-# these are mid-roll inserted ads, not creator sponsorships. Generic phrases
-# like "sponsored by" or "use code" don't appear. The reliable signal is
-# brand names mentioned directly in the ad audio (Lays, Starbucks, Ikea, etc.)
+# Brand names and keyword phrases are loaded from fusion/ad_signals.json so the lists can be extended without 
+# touching this file.
 #
-# A density check prevents false positives — the TED talk speaker mentions
-# McDonald's as part of content, but a single brand mention won't trigger
-# the threshold. Actual ads cluster multiple brand references together.
+# A density check on brand names prevents false positives — a single brand name mentioned in passing during 
+# content won't trigger the threshold. Actual ads cluster multiple brand references together.
 
-_AD_BRAND_NAMES = [
-    # test_001 ads
-    "lays", "lay's", "doritos",
-    # test_002 ads
-    "starbucks", "pepsi", "dove",
-    # test_003 ads
-    "ikea",
-    # test_004 ads
-    "mcdonald's", "mcdonalds", "google pixel", "nike",
-    # test_005 ads
-    "bvlgari", "bulgari", "coca-cola", "coca cola",
-    # Common ad brands for general use
-    "amazon", "apple", "samsung", "netflix", "spotify",
-    "squarespace", "nordvpn", "skillshare", "audible",
-    "expressvpn", "hello fresh", "factor meals",
-]
+def _load_ad_signals() -> tuple[list[str], dict[str, list[str]]]:
+    """
+    Load brand names and keyword phrases from ad_signals.json. Returns (brand_names, phrases) where phrases is a 
+    dict keyed by category. Falls back to empty lists if the file is missing.
+    """
+    signals_file = Path(__file__).parent / "ad_signals.json"
+    if not signals_file.is_file():
+        return [], {}
+    data = json.loads(signals_file.read_text(encoding="utf-8"))
 
-# Generic ad phrases — less common in this dataset but kept for robustness
-_SPONSORSHIP_PHRASES = [
-    "sponsored by", "brought to you by", "use code", "use my code",
-    "promo code", "discount code", "affiliate",
-    "link in the description", "link in bio",
-    "first month free", "limited time offer", "exclusive deal",
-    "check it out", "download the app", "available now", "on sale now",
-]
+    # Flatten all brand categories into a single deduplicated list
+    brand_names: list[str] = []
+    seen: set[str] = set()
+    for category_brands in data.get("brands", {}).values():
+        for name in category_brands:
+            if name not in seen:
+                seen.add(name)
+                brand_names.append(name)
 
-_SELF_PROMO_PHRASES = [
-    "subscribe", "hit the bell", "like and subscribe", "don't forget to subscribe",
-    "follow me", "follow us", "patreon", "merch", "my discord", "join the discord",
-    "become a member",
-]
+    phrases: dict[str, list[str]] = data.get("phrases", {})
+    return brand_names, phrases
 
-_OUTRO_PHRASES = [
-    "thanks for watching", "see you next time", "see you in the next",
-    "until next time", "that's all for today", "that's it for today",
-    "goodbye", "bye for now",
-]
 
-_INTRO_PHRASES = [
-    "welcome back", "welcome to", "in today's video", "in this video",
-    "today we", "today i'm going to", "today we're going to",
-    "let's get started", "let's dive in",
-]
+_AD_BRAND_NAMES, _AD_PHRASES = _load_ad_signals()
 
-_RECAP_PHRASES = [
-    "last time", "last episode", "previously", "as we discussed",
-    "as i mentioned", "in the previous", "recap",
-]
+_SPONSORSHIP_PHRASES = _AD_PHRASES.get("sponsorship", [])
+_SELF_PROMO_PHRASES = _AD_PHRASES.get("self_promotion", [])
+_OUTRO_PHRASES = _AD_PHRASES.get("outro", [])
+_INTRO_PHRASES = _AD_PHRASES.get("intro", [])
+_RECAP_PHRASES = _AD_PHRASES.get("recap", [])
 
 # Requiring 2+ brand hits in a 30-second window (15s before + 15s after)
 # avoids flagging isolated content mentions as ads.
@@ -122,16 +99,8 @@ _BRAND_HIT_THRESHOLD = 2
 def _classify_visual(w: VisualWindow, video_duration: float, position: float) -> str:
     """
     Map a single VisualWindow to a label using rule-based heuristics.
-
-    position is the fractional position in the video (0.0 = start, 1.0 = end),
-    used for intro/outro positional checks.
-
-    Tuned specifically for the 5 test videos:
-      - test_001: TED talk, ads cause sharp palette shifts
-      - test_002: NASA video, lots of motion throughout
-      - test_003: Despicable Me, animated content with vivid colors
-      - test_004: Stanford lecture, slides have high edge density but are content
-      - test_005: Nat Geo doc, dark nature b-roll, black opening screen
+    position is the fractional position in the video (0.0 = start, 1.0 = end), used for intro/outro positional 
+    checks.
     """
     m = w.motion_score
     e = w.edge_density
@@ -139,45 +108,44 @@ def _classify_visual(w: VisualWindow, video_duration: float, position: float) ->
     lum = w.luminance_mean
     hyp = w.visual_hypothesis
 
-    # Very dark and very still — black screens, holding screens, dead air.
-    # Thresholds kept tight so NASA footage and dark nature shots aren't caught.
+    # Very dark and very still — black screens, holding screens, dead air. Thresholds kept tight so dark nature 
+    # shots and low-light footage aren't incorrectly caught.
     if m < 0.05 and lum < 0.08:
         return LABEL_INACTIVITY
 
-    # Text-heavy, low motion, bright frame — likely a title card or transition.
-    # We skip this check for mid-video frames (position > 10%) without a shot
-    # boundary nearby, so Stanford lecture slides aren't flagged as transitions.
+    # Text-heavy, low motion, bright frame — likely a title card or transition. We skip this for mid-video frames 
+    # without a nearby shot boundary so that lecture slides and text overlays on content aren't flagged as 
+    # transitions.
     if w.high_text_density and m < 0.25 and lum > 0.55:
         if position < 0.10 or w.shot_boundary_near:
             return LABEL_TRANSITION
 
-    # Opening intro — catches test_005's title sequence and test_004's
-    # Stanford Engineering card in the first few percent of the video.
+    # Opening intro — catches title sequences, logo cards, and opening slates
+    # in the first few percent of the video.
     if position < 0.03 and hyp in ("static", "unknown", "graphics_heavy"):
         return LABEL_INTRO
 
     if position < 0.06 and w.shot_boundary_near and m < 0.35:
         return LABEL_INTRO
 
-    # Outro — test_005 ends with credits after ~21:16.
+    # Outro — catches credit sequences and closing cards near the end.
     if position > 0.92 and hyp in ("static", "unknown"):
         return LABEL_OUTRO
 
     if position > 0.95 and m < 0.20:
         return LABEL_OUTRO
 
-    # Strong palette divergence from the video's running average is the primary
-    # visual ad signal. Ads (Apple, Sony, Nike, Coca-Cola) look completely
-    # different from surrounding content. Thresholds are conservative to avoid
-    # false positives on lecture slides and animated content.
+    # Strong palette divergence from the video's running average is the primary visual ad signal. Inserted ads 
+    # look completely different from the surrounding content visually, causing a sharp shift in color distribution.
+    # Thresholds are conservative to reduce false positives on slides and visually varied content like animation.
     if p > 0.72 and hyp == "graphics_heavy":
         return LABEL_ADVERTISEMENT
 
     if p > 0.80:
         return LABEL_ADVERTISEMENT
 
-    # Graphics-heavy but not palette-divergent — likely a title card or
-    # intermission screen that didn't meet the brightness threshold above.
+    # Graphics-heavy but not palette-divergent — likely a title card or intermission screen that didn't meet the 
+    # brightness threshold above.
     if hyp == "graphics_heavy" and e > 0.50 and m < 0.30 and lum > 0.40:
         return LABEL_TRANSITION
 
@@ -191,7 +159,6 @@ def _audio_label_for_window(
 ) -> str | None:
     """
     Return a label override from audio features, or None if no strong signal.
-
     Reads extra fields from the audio teammate's AudioWindow objects:
         audio_label: "speech" | "music" | "silence" | "mixed"
         energy_rms: float (0-1)
@@ -208,8 +175,8 @@ def _audio_label_for_window(
             if audio_label == "silence" or energy < 0.02:
                 return LABEL_INACTIVITY
 
-            # A very high anomaly score means the audio diverges dramatically
-            # from the video baseline — strong signal for an inserted ad.
+            # A very high anomaly score means the audio diverges dramatically from the video baseline 
+            # — strong signal for an inserted ad.
             if anomaly > 0.75:
                 return LABEL_ADVERTISEMENT
 
@@ -225,14 +192,10 @@ def _speech_label_for_window(
 ) -> str | None:
     """
     Return a label override if speech around this window matches known patterns.
-
-    Tier 1 checks transcript text that directly overlaps the window for
-    generic sponsorship phrases, self-promotion language, outros, intros,
-    and recap language. A single match is enough to override.
-
-    Tier 2 scans a wider context window for brand name density. Requiring
-    multiple brand hits prevents false positives from isolated brand name
-    mentions in content (e.g. McDonald's in the TED talk).
+    Tier 1 checks transcript text that directly overlaps the window for generic sponsorship phrases, 
+    self-promotion language, outros, intros, and recap language. A single match is enough to override.
+    Tier 2 scans a wider context window for brand name density. Requiring multiple brand hits prevents false 
+    positives from isolated brand name mentions in content (e.g. McDonald's in the TED talk).
     """
     # Tier 1: check text that directly overlaps this window
     window_chunks: list[str] = []
@@ -296,15 +259,10 @@ def _smooth_labels(
 ) -> list[str]:
     """
     Two-pass smoother that absorbs short runs into their neighbors.
-
-    Forward pass: any run shorter than min_segment_seconds gets replaced
-    by the label of the preceding window.
-
-    Backward pass: same logic in reverse to catch anything the forward
-    pass missed.
-
-    This prevents short "Core Content" blips inside an ad block, or a
-    stray "Advertisement" label appearing mid-content.
+    Forward pass: any run shorter than min_segment_seconds gets replaced by the label of the preceding window.
+    Backward pass: same logic in reverse to catch anything the forward pass missed.
+    This prevents short "Core Content" blips inside an ad block, or a stray "Advertisement" label appearing 
+    mid-content.
     """
     if not labels:
         return labels
@@ -356,7 +314,9 @@ def _merge_into_segments(
     labels: list[str],
     windows: list[VisualWindow],
 ) -> list[dict[str, Any]]:
-    """Collapse consecutive same-label windows into segment dicts."""
+    """
+    Collapse consecutive same-label windows into segment dicts.
+    """
     if not labels:
         return []
 
@@ -389,9 +349,8 @@ def fuse_bundle_to_segments(
     min_segment_seconds: float = _MIN_SEGMENT_SECONDS,
 ) -> list[dict[str, Any]]:
     """
-    Main entry point. Takes an AnalysisBundle and returns labeled segment dicts
-    ready for the player. Works with just visual data; audio and speech improve
-    results when available.
+    Main entry point. Takes an AnalysisBundle and returns labeled segment dicts ready for the player. Works with 
+    just visual data; audio and speech improve results when available.
     """
     if bundle.visual is None or not bundle.visual.windows:
         return []
@@ -421,12 +380,16 @@ def fuse_bundle_to_segments(
 
 
 def load_bundle(path: Path) -> AnalysisBundle:
-    """Load an AnalysisBundle from a JSON file on disk."""
+    """
+    Load an AnalysisBundle from a JSON file on disk.
+    """
     return AnalysisBundle.model_validate_json(path.read_text(encoding="utf-8"))
 
 
 def write_segments_json(segments: list[dict[str, Any]], out_path: Path) -> None:
-    """Write the fused segments list to a JSON file the player can load."""
+    """
+    Write the fused segments list to a JSON file the player can load.
+    """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
