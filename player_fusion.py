@@ -29,7 +29,7 @@ in the following order:
 If found, segments are loaded instantly (no processing delay).
 If not found, the full fusion pipeline runs live (visual analysis + fuse).
 If the fusion pipeline fails for any reason, the player falls back to
-build_even_segments() so it never crashes.
+build_full_content_segment() so it never crashes.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from typing import Any
 # Segment dataclass (mirrors the one in player.py — imported if available,
 # otherwise re-defined here so this file is independently usable)
 try:
-    from player.player import Segment, build_segment_from_payload, build_even_segments, probe_video_duration_seconds
+    from player.player import Segment, build_segment_from_payload, build_full_content_segment, probe_video_duration_seconds
     _PLAYER_IMPORTS_OK = True
 except ImportError:
     _PLAYER_IMPORTS_OK = False
@@ -144,7 +144,7 @@ def run_video_segmentation(video_path: Path) -> list[Segment]:
       1. Load pre-computed segments.json if it exists next to the video
          or in data/output/.
       2. Otherwise, run visual analysis + fusion live and cache the result.
-      3. If everything fails, fall back to build_even_segments() so the
+      3. If everything fails, fall back to build_full_content_segment() so the
          player still works for demo purposes.
     """
     # 1. Pre-computed file
@@ -170,4 +170,4 @@ def run_video_segmentation(video_path: Path) -> list[Segment]:
     # 3. Graceful fallback — fake even segments so the player still opens
     print("[fusion] Falling back to demo segments.", file=sys.stderr)
     duration = probe_video_duration_seconds(video_path)
-    return build_even_segments(duration)
+    return build_full_content_segment(duration)
