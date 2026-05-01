@@ -1,5 +1,4 @@
 """
-
 Drop-in replacement for run_video_segmentation() in player/player.py.
 
 HOW TO INTEGRATE
@@ -20,16 +19,15 @@ With this single import + call:
 Or copy-paste the function body directly into player.py.
 
 LOOKUP ORDER
-When a video is loaded, the player looks for a pre-computed segments file
-in the following order:
+When a video is loaded, the player looks for a pre-computed segments file in the following order:
 
   1. data/output/<video_stem>_segments.json   (standard fusion output path)
   2. <same_dir_as_video>/<video_stem>_segments.json
 
 If found, segments are loaded instantly (no processing delay).
 If not found, the full fusion pipeline runs live (visual analysis + fuse).
-If the fusion pipeline fails for any reason, the player falls back to
-build_full_content_segment() so it never crashes.
+If the fusion pipeline fails for any reason, the player falls back to build_full_content_segment() so it never 
+crashes.
 """
 
 from __future__ import annotations
@@ -41,8 +39,8 @@ from pathlib import Path
 from typing import Any
 
 
-# Segment dataclass (mirrors the one in player.py — imported if available,
-# otherwise re-defined here so this file is independently usable)
+# Segment dataclass (mirrors the one in player.py — imported if available, otherwise re-defined here so this 
+# file is independently usable)
 try:
     from player.player import Segment, build_segment_from_payload, build_full_content_segment, probe_video_duration_seconds
     _PLAYER_IMPORTS_OK = True
@@ -103,6 +101,16 @@ def _run_fusion_live(video_path: Path) -> list[Segment]:
     print(f"[fusion] Running visual analysis on {video_path.name} …", file=sys.stderr)
     bundle = build_analysis_bundle(video_path)
 
+    # Wire in audio analysis
+    try:
+        from audio.analyze import analyze_audio
+        print(f"[fusion] Running audio analysis on {video_path.name} …", file=sys.stderr)
+        audio_windows, _ = analyze_audio(video_path=video_path)
+        bundle.audio_windows = audio_windows
+        print(f"[fusion] Got {len(audio_windows)} audio windows.", file=sys.stderr)
+    except Exception as e:
+        print(f"[fusion] Audio analysis unavailable, skipping: {e}", file=sys.stderr)
+
     # Wire in speech recognition if the module is available
     try:
         from Automatic_speech_recognition.segment_text_analyzer import build_speech_spans
@@ -141,11 +149,10 @@ def run_video_segmentation(video_path: Path) -> list[Segment]:
     Replacement for the stub run_video_segmentation() in player/player.py.
 
     Priority:
-      1. Load pre-computed segments.json if it exists next to the video
-         or in data/output/.
+      1. Load pre-computed segments.json if it exists next to the video or in data/output/.
       2. Otherwise, run visual analysis + fusion live and cache the result.
-      3. If everything fails, fall back to build_full_content_segment() so the
-         player still works for demo purposes.
+      3. If everything fails, fall back to build_full_content_segment() so the player still works for demo 
+         purposes.
     """
     # 1. Pre-computed file
     segments_file = _find_segments_file(video_path)

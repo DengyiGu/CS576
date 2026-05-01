@@ -2,7 +2,6 @@
 CLI entry point for the fusion pipeline.
 
 Two modes:
-
   Bundle mode (fast, for iteration after visual analysis is already done):
     python -m fusion --bundle data/output/test_001_analysis_bundle.json
 
@@ -37,7 +36,9 @@ def _run_visual_and_fuse(
     min_segment_seconds: float,
     skip_speech: bool = False,
 ) -> int:
-    """Run visual analysis, optionally speech recognition, then fuse."""
+    """
+    Run visual analysis, optionally speech recognition, then fuse.
+    """
     try:
         from visual.analyze import analyze_visual, build_analysis_bundle, write_analysis_bundle_json
     except ImportError as exc:
@@ -53,6 +54,16 @@ def _run_visual_and_fuse(
 
     print(f"[fusion] Running visual analysis on {video.name} ...")
     bundle = build_analysis_bundle(video, track=analyze_visual(video, sample_fps=sample_fps, window_sec=window_sec))
+
+    # Wire in audio analysis
+    try:
+        from audio.analyze import analyze_audio
+        print(f"[fusion] Running audio analysis on {video.name} ...")
+        audio_windows, _ = analyze_audio(video_path=video, window_sec=window_sec)
+        bundle.audio_windows = audio_windows
+        print(f"[fusion] Got {len(audio_windows)} audio windows.")
+    except Exception as e:
+        print(f"[fusion] Audio analysis unavailable, running without: {e}")
 
     if not skip_speech:
         try:
@@ -198,6 +209,21 @@ def main(argv: list[str] | None = None) -> int:
     if bundle.visual is None or not bundle.visual.windows:
         print("Error: bundle contains no visual windows. Re-run visual_analyze first.", file=sys.stderr)
         return 1
+
+    # Try to add audio if the bundle doesn't already have it
+    if not bundle.audio_windows:
+        video_path_str = bundle.video_path
+        if video_path_str:
+            video_for_audio = Path(video_path_str)
+            if video_for_audio.is_file():
+                try:
+                    from audio.analyze import analyze_audio
+                    print(f"[fusion] Running audio analysis on {video_for_audio.name} ...")
+                    audio_windows, _ = analyze_audio(video_path=video_for_audio, window_sec=args.window_sec)
+                    bundle.audio_windows = audio_windows
+                    print(f"[fusion] Got {len(audio_windows)} audio windows.")
+                except Exception as e:
+                    print(f"[fusion] Audio analysis unavailable, running without: {e}")
 
     # Try to add speech if the bundle doesn't already have it
     if not args.skip_speech and not bundle.speech_spans:
