@@ -1,33 +1,17 @@
 """
-Multimodal fusion layer – edge-based ad detection with exactly 3 ads.
+Multimodal fusion layer – transcript-first ad detection.
 
-Strategy (redesigned)
----------------------
-Ads create TWO hard cuts:
-  content → ad  : abrupt palette shift, audio change, often speech stops
-  ad → content  : abrupt palette shift, audio change, often speech resumes
+Key insight from ground truth analysis:
+- Content has continuous speech from the same speaker(s)
+- Ad breaks interrupt this speech with different audio/visual characteristics
+- The STRONGEST signal is the speech-to-non-speech transition combined
+  with visual change at the same timestamp
 
-Rather than maximising a foreignness score over an interval (which inflates
-interval sizes), we:
-
-1. Compute a per-window "edge strength" at each boundary between consecutive
-   windows: palette_delta already measures this.  We combine it with an audio-
-   change signal and a speech-gap signal to form a "cut score".
-
-2. Find all candidate cut points above a threshold — these are potential
-   ad start/end boundaries.
-
-3. Use a DP over candidate cut pairs to find exactly 3 (start, end) pairs
-   that maximise a combined score:
-       score(s,e) = edge_strength(s) + edge_strength(e)
-                   + foreignness_bonus(s, e)   # content inside is "foreign"
-   subject to:
-       AD_MIN_SEC ≤ e−s ≤ AD_MAX_SEC
-       GAP_MIN_SEC between consecutive ads
-       first ad start ≥ FIRST_AD_MIN_START_SEC
-
-4. Assign content labels: at most one Intro (before first ad) and one Outro
-   (after last ad); Inactivity for dark/still blocks; Core Content otherwise.
+Strategy:
+1. Identify "breakpoints" where speech stops AND visual changes happen
+2. Score candidate ad intervals based on speech gap + audio anomaly
+3. Use DP to find exactly 3 non-overlapping intervals
+4. Hard constraints from ground truth: ads are 28-118s, first ad ≥ 105s
 """
 
 from __future__ import annotations
@@ -47,11 +31,7 @@ LABEL_CORE_CONTENT   = "Core Content"
 LABEL_INTRO          = "Intro"
 LABEL_OUTRO          = "Outro"
 LABEL_ADVERTISEMENT  = "Advertisement"
-LABEL_SELF_PROMOTION = "Self-Promotion"
-LABEL_RECAP          = "Recap"
-LABEL_TRANSITION     = "Transition"
 LABEL_INACTIVITY     = "Inactivity"
-LABEL_FILLER         = "Filler"
 
 KIND_CONTENT     = "content"
 KIND_NON_CONTENT = "non-content"
@@ -61,500 +41,423 @@ _KIND_FOR_LABEL: dict[str, str] = {
     LABEL_INTRO:          KIND_NON_CONTENT,
     LABEL_OUTRO:          KIND_NON_CONTENT,
     LABEL_ADVERTISEMENT:  KIND_NON_CONTENT,
-    LABEL_SELF_PROMOTION: KIND_NON_CONTENT,
-    LABEL_RECAP:          KIND_NON_CONTENT,
-    LABEL_TRANSITION:     KIND_NON_CONTENT,
     LABEL_INACTIVITY:     KIND_NON_CONTENT,
-    LABEL_FILLER:         KIND_NON_CONTENT,
 }
 
 # ---------------------------------------------------------------------------
-# Hyper-parameters
+# Hard constraints from ground truth analysis
 # ---------------------------------------------------------------------------
 NUM_ADS = 3
 
-# Ad duration bounds (seconds) — ground truth range is ~28–118s
-AD_MIN_SEC  = 20.0
-AD_MAX_SEC  = 130.0   # tightened from 200 — longest known ad is 118.2s
+# Ad duration: ground truth range across all 5 videos is 28s – 118s
+AD_MIN_SEC = 28.0
+AD_MAX_SEC = 119.0
 
-# Minimum content gap between two consecutive ads
-GAP_MIN_SEC = 60.0
+# First ad earliest start: 1:45 = 105 seconds
+FIRST_AD_MIN_START_SEC = 105.0
 
-# First ad cannot start before this many seconds into the video
-FIRST_AD_MIN_START_SEC = 30.0
+# Latest ad end: ~26 minutes into final video
+LAST_AD_MAX_END_SEC = 26.0 * 60.0  # 1560 seconds
 
-# Score component weights for the "foreignness" interior bonus
-W_PALETTE  = 0.40
-W_AUDIO    = 0.35
-W_NOSPEECH = 0.25
+# Minimum content gap between ads: at least 2 minutes of content
+GAP_MIN_SEC = 120.0
 
-# How many windows to smooth over when computing edge scores
-SMOOTH_HALF_WIN    = 2
-
-# Radius (seconds) for "is there nearby speech?" check
-SPEECH_CONTEXT_SEC = 6.0
-
-# Weight of edge signal vs interior foreignness in the final DP score.
-# Higher EDGE_WEIGHT pushes the algorithm to favour sharp cut points.
-EDGE_WEIGHT       = 2.5
-INTERIOR_WEIGHT   = 1.0
+# Ignore intro region completely for ad detection
+IGNORE_START_SEC = 100.0
 
 # ---------------------------------------------------------------------------
-# Ad-signal phrase/brand loading
+# Signal computation – TRANSCRIPT FIRST
 # ---------------------------------------------------------------------------
 
-def _load_ad_signals() -> tuple[list[str], dict[str, list[str]]]:
-    signals_file = Path(__file__).parent / "ad_signals.json"
-    if not signals_file.is_file():
-        return [], {}
-    data = json.loads(signals_file.read_text(encoding="utf-8"))
-    brand_names: list[str] = []
-    seen: set[str] = set()
-    for category_brands in data.get("brands", {}).values():
-        for name in category_brands:
-            if name not in seen:
-                seen.add(name)
-                brand_names.append(name)
-    return brand_names, data.get("phrases", {})
+def _get_window_sec(windows: list[VisualWindow]) -> float:
+    if not windows:
+        return 2.0
+    return windows[0].t1 - windows[0].t0
 
 
-_AD_BRAND_NAMES, _AD_PHRASES = _load_ad_signals()
-_SPONSORSHIP_PHRASES = _AD_PHRASES.get("sponsorship", [])
-_SELF_PROMO_PHRASES  = _AD_PHRASES.get("self_promotion", [])
-_OUTRO_PHRASES       = _AD_PHRASES.get("outro", [])
-_INTRO_PHRASES       = _AD_PHRASES.get("intro", [])
-_RECAP_PHRASES       = _AD_PHRASES.get("recap", [])
-
-# ---------------------------------------------------------------------------
-# Per-window audio helpers
-# ---------------------------------------------------------------------------
-
-def _audio_features(
-    t0: float, t1: float, audio_windows: list[AudioWindow]
-) -> tuple[float, float]:
-    """Return (anomaly_score, energy_rms) for the audio window closest to [t0,t1]."""
-    mid = 0.5 * (t0 + t1)
-    best_dist = float("inf")
-    anomaly = 0.0
-    energy  = 1.0
-    for aw in audio_windows:
-        d = abs(0.5 * (aw.t0 + aw.t1) - mid)
-        if d < best_dist:
-            best_dist = d
-            extra   = aw.model_extra or {}
-            anomaly = float(extra.get("anomaly_score", 0.0))
-            energy  = float(extra.get("energy_rms", 1.0))
-    return anomaly, energy
-
-
-def _audio_delta(
-    t_mid: float,
-    audio_windows: list[AudioWindow],
-    half_sec: float = 4.0,
-) -> float:
-    """
-    Measure audio change around time t_mid.
-    Compare average anomaly in [t_mid-half_sec, t_mid] vs [t_mid, t_mid+half_sec].
-    Returns a value in [0, 1].
-    """
-    before_vals, after_vals = [], []
-    for aw in audio_windows:
-        mid = 0.5 * (aw.t0 + aw.t1)
-        extra = aw.model_extra or {}
-        a = float(extra.get("anomaly_score", 0.0))
-        if t_mid - half_sec <= mid < t_mid:
-            before_vals.append(a)
-        elif t_mid <= mid < t_mid + half_sec:
-            after_vals.append(a)
-    if not before_vals or not after_vals:
-        return 0.0
-    return abs(np.mean(after_vals) - np.mean(before_vals))
-
-
-def _speech_coverage(t0: float, t1: float, speech_spans: list[SpeechSpan]) -> float:
-    dur = max(t1 - t0, 1e-6)
-    covered = 0.0
-    for span in speech_spans:
-        ov_s = max(t0, span.t0)
-        ov_e = min(t1, span.t1)
-        if ov_e > ov_s:
-            covered += ov_e - ov_s
-    return min(1.0, covered / dur)
-
-
-def _has_nearby_speech(
-    t0: float, t1: float, speech_spans: list[SpeechSpan], context: float
-) -> bool:
-    lo, hi = t0 - context, t1 + context
-    return any(s.t1 >= lo and s.t0 <= hi for s in speech_spans)
-
-
-def _speech_text_ad_signal(
-    t0: float, t1: float, speech_spans: list[SpeechSpan]
-) -> float:
-    lo, hi = t0 - 20.0, t1 + 20.0
-    chunks = [
-        s.text.lower() for s in speech_spans
-        if s.t1 >= lo and s.t0 <= hi and s.text
-    ]
-    if not chunks:
-        return 0.0
-    combined = " ".join(chunks)
-    for phrase in _SPONSORSHIP_PHRASES:
-        if phrase in combined:
-            return 0.9
-    brand_hits = sum(1 for b in _AD_BRAND_NAMES if b in combined)
-    if brand_hits >= 2:
-        return 0.6
-    if brand_hits == 1:
-        return 0.3
-    return 0.0
-
-# ---------------------------------------------------------------------------
-# Step 1 – per-window foreignness score (interior signal)
-# ---------------------------------------------------------------------------
-
-def _compute_foreignness_scores(
-    windows: list[VisualWindow],
-    audio_windows: list[AudioWindow],
+def _compute_speech_gap_segments(
     speech_spans: list[SpeechSpan],
     duration: float,
-) -> np.ndarray:
+    gap_min_sec: float = 10.0,
+) -> list[tuple[float, float]]:
     """
-    Per-window foreignness score in [0,1].
-    Higher → more likely to be inside an advertisement.
+    Find gaps in speech that are at least gap_min_sec long.
+    These are candidate locations for ads.
+    
+    Returns list of (gap_start, gap_end) time ranges where there's no speech.
     """
-    N = len(windows)
-    scores = np.zeros(N, dtype=np.float64)
-
-    for i, w in enumerate(windows):
-        t0, t1 = w.t0, w.t1
-        mid = 0.5 * (t0 + t1)
-
-        palette_score = float(w.palette_delta)
-
-        anomaly, energy = _audio_features(t0, t1, audio_windows)
-        audio_score = float(anomaly)
-        if energy < 0.015:
-            audio_score = max(audio_score, 0.8)
-
-        cov    = _speech_coverage(t0, t1, speech_spans)
-        nearby = _has_nearby_speech(t0, t1, speech_spans, SPEECH_CONTEXT_SEC)
-        text_sig = _speech_text_ad_signal(t0, t1, speech_spans)
-
-        nospeech_score = 0.0
-        if not nearby:
-            nospeech_score = 0.85
-        elif cov < 0.05:
-            nospeech_score = 0.55
-
-        if text_sig > 0:
-            audio_score    = max(audio_score, text_sig)
-            nospeech_score = max(nospeech_score, 0.4)
-
-        # Suppress very start/end of video
-        if mid < FIRST_AD_MIN_START_SEC or mid > duration - 20.0:
-            palette_score  *= 0.1
-            audio_score    *= 0.1
-            nospeech_score *= 0.1
-
-        scores[i] = (
-            W_PALETTE  * palette_score
-            + W_AUDIO  * audio_score
-            + W_NOSPEECH * nospeech_score
-        )
-
-    return scores
+    if not speech_spans:
+        return [(0.0, duration)]
+    
+    sorted_spans = sorted(speech_spans, key=lambda s: s.t0)
+    
+    gaps = []
+    cursor = 0.0
+    
+    for span in sorted_spans:
+        if span.t0 > cursor + gap_min_sec:
+            gaps.append((cursor, span.t0))
+        cursor = max(cursor, span.t1)
+    
+    if duration > cursor + gap_min_sec:
+        gaps.append((cursor, duration))
+    
+    return gaps
 
 
-# ---------------------------------------------------------------------------
-# Step 2 – per-boundary edge score
-# ---------------------------------------------------------------------------
-
-def _compute_edge_scores(
+def _compute_speech_density_per_window(
     windows: list[VisualWindow],
-    audio_windows: list[AudioWindow],
     speech_spans: list[SpeechSpan],
-    duration: float,
 ) -> np.ndarray:
     """
-    Edge score at each window boundary i (between window i-1 and window i).
-    Returns array of shape (N,) where index i = edge just before window i.
-    Index 0 is unused (no edge before first window).
-
-    A high edge score means a hard cut likely occurred at this boundary.
-    We use:
-      - palette_delta of window i  (already a boundary-level signal)
-      - change in audio anomaly across the boundary
-      - speech transition: speech just before but not after (or vice versa)
-    """
-    N = len(windows)
-    edge = np.zeros(N, dtype=np.float64)
-
-    for i in range(1, N):
-        t_boundary = windows[i].t0
-
-        # Visual: palette_delta is already the delta at this boundary
-        vis = float(windows[i].palette_delta)
-
-        # Audio: change in anomaly across boundary
-        aud_delta = _audio_delta(t_boundary, audio_windows, half_sec=3.0)
-
-        # Speech transition: was there speech just before but not after?
-        had_speech_before = _has_nearby_speech(
-            t_boundary - 4.0, t_boundary, speech_spans, 0.5
-        )
-        has_speech_after = _has_nearby_speech(
-            t_boundary, t_boundary + 4.0, speech_spans, 0.5
-        )
-        speech_transition = 1.0 if (had_speech_before != has_speech_after) else 0.0
-
-        # Suppress edges very close to start/end
-        mid = t_boundary
-        if mid < FIRST_AD_MIN_START_SEC or mid > duration - 20.0:
-            vis             *= 0.1
-            aud_delta       *= 0.1
-            speech_transition *= 0.1
-
-        edge[i] = 0.50 * vis + 0.35 * aud_delta + 0.15 * speech_transition
-
-    return edge
-
-
-def _smooth(scores: np.ndarray, half_win: int) -> np.ndarray:
-    if half_win <= 0:
-        return scores.copy()
-    N = len(scores)
-    out = np.zeros(N, dtype=np.float64)
-    for i in range(N):
-        lo = max(0, i - half_win)
-        hi = min(N, i + half_win + 1)
-        out[i] = scores[lo:hi].mean()
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Step 3 – DP over edge pairs to find exactly 3 ad intervals
-# ---------------------------------------------------------------------------
-
-def _find_best_three_ads(
-    edge_scores: np.ndarray,
-    foreign_scores: np.ndarray,
-    windows: list[VisualWindow],
-) -> list[tuple[int, int]]:
-    """
-    Find exactly 3 non-overlapping ad intervals [s, e) (window indices).
-
-    Score for interval [s, e):
-        edge_scores[s] + edge_scores[e]          ← hard-cut signal at both ends
-        + INTERIOR_WEIGHT * mean(foreign[s:e])   ← foreignness of interior
-
-    All terms are normalised so they're on a comparable scale.
-
-    Constraints:
-        AD_MIN_SEC ≤ duration ≤ AD_MAX_SEC
-        gap ≥ GAP_MIN_SEC between consecutive ads
-        first ad start ≥ FIRST_AD_MIN_START_SEC
+    Compute fraction of each window covered by speech.
+    Returns 0 = full speech, 1 = no speech.
     """
     N = len(windows)
     if N == 0:
-        return []
-
-    # Normalise scores to [0, 1]
-    e_max = edge_scores.max()
-    f_max = foreign_scores.max()
-    norm_edge    = edge_scores    / (e_max    + 1e-9)
-    norm_foreign = foreign_scores / (f_max    + 1e-9)
-
-    # FIX: Pad norm_edge with a 0.0 at the end to prevent IndexError when e == N
-    norm_edge = np.append(norm_edge, 0.0)
-
-    # Prefix sums for fast interior mean computation
-    cum_foreign = np.concatenate([[0.0], np.cumsum(norm_foreign)])
-
-    def interval_score(s: int, e: int) -> float:
-        """Score for ad interval [s, e)."""
-        interior_mean = (cum_foreign[e] - cum_foreign[s]) / max(e - s, 1)
-        return (EDGE_WEIGHT * (norm_edge[s] + norm_edge[e])
-                + INTERIOR_WEIGHT * interior_mean)
-
-    window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
-    min_w = max(1, int(AD_MIN_SEC / window_sec))
-    max_w = max(min_w + 1, int(AD_MAX_SEC / window_sec) + 1)
-    gap_w = max(1, int(GAP_MIN_SEC / window_sec))
-
-    # Find first_start_idx: first window whose t0 ≥ FIRST_AD_MIN_START_SEC
-    first_start_idx = 0
+        return np.zeros(0)
+    
+    scores = np.zeros(N)
     for i, w in enumerate(windows):
-        if w.t0 >= FIRST_AD_MIN_START_SEC:
-            first_start_idx = i
-            break
-
-    NEG_INF = float("-inf")
-
-    # ------------------------------------------------------------------
-    # Stage 1: best single ad ending at each index e
-    # ------------------------------------------------------------------
-    b1s  = np.full(N + 1, NEG_INF, dtype=np.float64)
-    b1st = np.full(N + 1, -1,      dtype=np.int32)
-
-    for e in range(min_w, N + 1):
-        s_lo = max(first_start_idx, e - max_w)
-        s_hi = e - min_w
-        if s_lo > s_hi:
+        window_dur = w.t1 - w.t0
+        if window_dur <= 0:
             continue
-        t_e = windows[e - 1].t1
-        for s in range(s_hi, s_lo - 1, -1):
-            if windows[s].t0 < FIRST_AD_MIN_START_SEC:
-                break
-            dur = t_e - windows[s].t0
-            if dur < AD_MIN_SEC:
-                continue
-            if dur > AD_MAX_SEC:
-                break
-            sc = interval_score(s, e)
-            if sc > b1s[e]:
-                b1s[e]  = sc
-                b1st[e] = s
+        
+        speech_time = 0.0
+        for s in speech_spans:
+            overlap = min(s.t1, w.t1) - max(s.t0, w.t0)
+            if overlap > 0:
+                speech_time += overlap
+        
+        coverage = min(1.0, speech_time / window_dur)
+        scores[i] = 1.0 - coverage  # High = no speech
+    
+    return scores
 
-    # Prefix max
-    p1s  = np.full(N + 1, NEG_INF, dtype=np.float64)
-    p1e  = np.full(N + 1, -1,      dtype=np.int32)
-    p1st = np.full(N + 1, -1,      dtype=np.int32)
-    for i in range(N + 1):
-        if i > 0:
-            p1s[i]  = p1s[i - 1]
-            p1e[i]  = p1e[i - 1]
-            p1st[i] = p1st[i - 1]
-        if b1s[i] > p1s[i]:
-            p1s[i]  = b1s[i]
-            p1e[i]  = i
-            p1st[i] = b1st[i]
 
-    # ------------------------------------------------------------------
-    # Stage 2: best pair
-    # ------------------------------------------------------------------
-    b2s  = np.full(N + 1, NEG_INF, dtype=np.float64)
-    b2s2 = np.full(N + 1, -1,      dtype=np.int32)
-    b2e1 = np.full(N + 1, -1,      dtype=np.int32)
-    b2s1 = np.full(N + 1, -1,      dtype=np.int32)
+def _compute_visual_discontinuity(windows: list[VisualWindow]) -> np.ndarray:
+    """
+    Enhanced visual discontinuity combining palette change + shot boundaries.
+    """
+    N = len(windows)
+    if N == 0:
+        return np.zeros(0)
+    
+    scores = np.zeros(N)
+    for i in range(N):
+        pd = windows[i].palette_delta
+        shot = 1.0 if windows[i].shot_boundary_near else 0.0
+        
+        # Combine: palette delta peaks + shot boundaries
+        scores[i] = max(pd, shot * 0.7)
+    
+    return scores
 
-    for e2 in range(min_w, N + 1):
-        s2_lo = max(first_start_idx, e2 - max_w)
-        s2_hi = e2 - min_w
-        if s2_lo > s2_hi:
-            continue
-        t_e2 = windows[e2 - 1].t1
-        for s2 in range(s2_hi, s2_lo - 1, -1):
-            if windows[s2].t0 < FIRST_AD_MIN_START_SEC:
-                break
-            dur = t_e2 - windows[s2].t0
-            if dur < AD_MIN_SEC:
-                continue
-            if dur > AD_MAX_SEC:
-                break
-            sc2 = interval_score(s2, e2)
-            me1 = s2 - gap_w
-            if me1 < 0 or p1s[me1] <= NEG_INF:
-                continue
-            total = p1s[me1] + sc2
-            if total > b2s[e2]:
-                b2s[e2]  = total
-                b2s2[e2] = s2
-                b2e1[e2] = int(p1e[me1])
-                b2s1[e2] = int(p1st[me1])
 
-    # Prefix max
-    p2s  = np.full(N + 1, NEG_INF, dtype=np.float64)
-    p2e2 = np.full(N + 1, -1,      dtype=np.int32)
-    p2s2 = np.full(N + 1, -1,      dtype=np.int32)
-    p2e1 = np.full(N + 1, -1,      dtype=np.int32)
-    p2s1 = np.full(N + 1, -1,      dtype=np.int32)
-    for i in range(N + 1):
-        if i > 0:
-            p2s[i]  = p2s[i - 1]
-            p2e2[i] = p2e2[i - 1]
-            p2s2[i] = p2s2[i - 1]
-            p2e1[i] = p2e1[i - 1]
-            p2s1[i] = p2s1[i - 1]
-        if b2s[i] > p2s[i]:
-            p2s[i]  = b2s[i]
-            p2e2[i] = i
-            p2s2[i] = b2s2[i]
-            p2e1[i] = b2e1[i]
-            p2s1[i] = b2s1[i]
+def _compute_joint_breakpoint_score(
+    windows: list[VisualWindow],
+    speech_density: np.ndarray,
+    visual_disc: np.ndarray,
+    audio_windows: list[AudioWindow],
+) -> np.ndarray:
+    """
+    Compute a "breakpoint" score at each window.
+    High score = speech just stopped/changed AND visual changes.
+    
+    This is the KEY signal: when both speech and visuals change simultaneously,
+    that's very likely an ad boundary.
+    """
+    N = len(windows)
+    if N < 2:
+        return np.zeros(N)
+    
+    scores = np.zeros(N)
+    window_sec = _get_window_sec(windows)
+    
+    for i in range(1, N):
+        t_boundary = windows[i].t0
+        
+        # Speech transition: did speech stop or start near this boundary?
+        look_sec = 4.0
+        look_windows = max(1, int(look_sec / window_sec))
+        
+        before_speech = np.mean(speech_density[max(0, i-look_windows):i]) if i > 0 else 0
+        after_speech = np.mean(speech_density[i:min(N, i+look_windows)]) if i < N else 0
+        speech_change = abs(after_speech - before_speech)
+        
+        # Visual discontinuity at boundary
+        vis_change = visual_disc[i] if i < N else 0
+        
+        # Audio anomaly change
+        audio_change = 0.0
+        half_sec = 3.0
+        before_audio = []
+        after_audio = []
+        for aw in audio_windows:
+            aw_mid = 0.5 * (aw.t0 + aw.t1)
+            if t_boundary - half_sec <= aw_mid < t_boundary:
+                before_audio.append(float((aw.model_extra or {}).get("anomaly_score", 0.0)))
+            elif t_boundary <= aw_mid < t_boundary + half_sec:
+                after_audio.append(float((aw.model_extra or {}).get("anomaly_score", 0.0)))
+        
+        if before_audio and after_audio:
+            audio_change = abs(np.mean(after_audio) - np.mean(before_audio))
+        
+        # PRODUCT: speech change AND visual change must both be present
+        # This dramatically reduces false positives
+        scores[i] = speech_change * vis_change * (1.0 + audio_change)
+    
+    # Normalize
+    smax = scores.max()
+    if smax > 1e-9:
+        scores = scores / smax
+    
+    return scores
 
-    # ------------------------------------------------------------------
-    # Stage 3: best triple
-    # ------------------------------------------------------------------
-    best3_total = NEG_INF
-    best3: list[tuple[int, int]] = []
 
-    for e3 in range(min_w, N + 1):
-        s3_lo = max(first_start_idx, e3 - max_w)
-        s3_hi = e3 - min_w
-        if s3_lo > s3_hi:
-            continue
-        t_e3 = windows[e3 - 1].t1
-        for s3 in range(s3_hi, s3_lo - 1, -1):
-            if windows[s3].t0 < FIRST_AD_MIN_START_SEC:
-                break
-            dur = t_e3 - windows[s3].t0
-            if dur < AD_MIN_SEC:
-                continue
-            if dur > AD_MAX_SEC:
-                break
-            sc3 = interval_score(s3, e3)
-            me2 = s3 - gap_w
-            if me2 < 0 or p2s[me2] <= NEG_INF:
-                continue
-            total3 = p2s[me2] + sc3
-            if total3 > best3_total:
-                best3_total = total3
-                s1 = int(p2s1[me2])
-                e1 = int(p2e1[me2])
-                s2 = int(p2s2[me2])
-                e2 = int(p2e2[me2])
-                best3 = [(s1, e1), (s2, e2), (s3, e3)]
-
-    return best3
+def _compute_ad_likelihood(
+    windows: list[VisualWindow],
+    speech_density: np.ndarray,
+    audio_windows: list[AudioWindow],
+    visual_disc: np.ndarray,
+    duration: float,
+) -> np.ndarray:
+    """
+    Per-window ad likelihood.
+    Ads = low speech + high audio anomaly + moderate visual change.
+    """
+    N = len(windows)
+    if N == 0:
+        return np.zeros(0)
+    
+    # Audio anomaly scores
+    audio_anomaly = np.zeros(N)
+    window_sec = _get_window_sec(windows)
+    for i, w in enumerate(windows):
+        mid = 0.5 * (w.t0 + w.t1)
+        vals = []
+        for aw in audio_windows:
+            aw_mid = 0.5 * (aw.t0 + aw.t1)
+            if abs(aw_mid - mid) < window_sec:
+                vals.append(float((aw.model_extra or {}).get("anomaly_score", 0.0)))
+        audio_anomaly[i] = float(np.mean(vals)) if vals else 0.0
+    
+    # Motion: penalize extreme static (inactivity) or extreme high motion
+    motion = np.array([w.motion_score for w in windows])
+    motion_score = 1.0 - np.abs(motion - 0.3) / 0.3
+    motion_score = np.clip(motion_score, 0.0, 1.0)
+    
+    # Luminance: penalize very dark
+    luminance = np.array([w.luminance_mean for w in windows])
+    dark_penalty = np.exp(-luminance / 0.05)  # Sharp penalty below 5% luminance
+    
+    # High text density: slight penalty (slides)
+    high_text = np.array([0.3 if w.high_text_density else 0.0 for w in windows])
+    
+    raw = (
+        0.30 * speech_density +       # No speech = ad-like
+        0.25 * audio_anomaly +         # Different audio = ad-like
+        0.20 * visual_disc +           # Visual changes
+        0.15 * motion_score -          # Moderate motion preferred
+        0.05 * dark_penalty -          # Not dark/inactive
+        0.05 * high_text               # Not slides
+    )
+    
+    # Suppress start/end
+    for i, w in enumerate(windows):
+        mid = 0.5 * (w.t0 + w.t1)
+        if mid < IGNORE_START_SEC:
+            raw[i] *= max(0.01, mid / IGNORE_START_SEC)
+        elif mid > LAST_AD_MAX_END_SEC:
+            raw[i] *= max(0.01, (duration - mid) / max(1, duration - LAST_AD_MAX_END_SEC))
+    
+    # Normalize
+    smin = np.min(raw)
+    smax = np.max(raw)
+    if smax > smin + 1e-9:
+        return (raw - smin) / (smax - smin)
+    return np.zeros(N)
 
 
 # ---------------------------------------------------------------------------
-# Step 4 – Refine boundaries using local edge maxima
+# Smoothing
+# ---------------------------------------------------------------------------
+
+def _smooth(signal: np.ndarray, width: int) -> np.ndarray:
+    if width <= 0 or len(signal) == 0:
+        return signal.copy()
+    if width % 2 == 0:
+        width += 1
+    kernel = np.ones(width) / width
+    return np.convolve(signal, kernel, mode='same')
+
+
+# ---------------------------------------------------------------------------
+# DP to find best 3 ad intervals
+# ---------------------------------------------------------------------------
+
+def _find_three_ads(
+    ad_likelihood: np.ndarray,
+    breakpoint_scores: np.ndarray,
+    windows: list[VisualWindow],
+) -> list[tuple[int, int]]:
+    """
+    Find exactly 3 non-overlapping intervals [s, e) that:
+    - Are within AD_MIN_SEC to AD_MAX_SEC duration
+    - Have at least GAP_MIN_SEC of content between them
+    - Start at or after FIRST_AD_MIN_START_SEC in video time
+    """
+    N = len(ad_likelihood)
+    if N == 0:
+        return []
+    
+    window_sec = _get_window_sec(windows)
+    min_w = max(1, int(AD_MIN_SEC / window_sec))
+    max_w = max(min_w + 1, int(AD_MAX_SEC / window_sec) + 1)
+    gap_w = max(1, int(GAP_MIN_SEC / window_sec))
+    
+    # Find first window index that satisfies FIRST_AD_MIN_START_SEC
+    first_valid_idx = 0
+    for i, w in enumerate(windows):
+        if w.t0 >= FIRST_AD_MIN_START_SEC:
+            first_valid_idx = i
+            break
+    
+    def _score(s: int, e: int) -> float:
+        if e - s < min_w or e - s > max_w:
+            return -float("inf")
+        if s < first_valid_idx:
+            return -float("inf")
+        
+        # Interior ad likelihood
+        interior = np.mean(ad_likelihood[s:e])
+        
+        # Boundary scores (how strong are the edges)
+        edge_bonus = 0.0
+        if s > 0 and s < N:
+            edge_bonus += breakpoint_scores[s]
+        if e > 0 and e < N:
+            edge_bonus += breakpoint_scores[e]
+        
+        return 0.7 * interior + 0.3 * edge_bonus / 2.0
+    
+    # Build interval score cache for DP
+    score_cache = {}
+    for s in range(first_valid_idx, N):
+        for e in range(s + min_w, min(s + max_w + 1, N + 1)):
+            sc = _score(s, e)
+            if sc > -float("inf"):
+                score_cache[(s, e)] = sc
+    
+    NEG = -float("inf")
+    
+    # DP Stage 1: best single ad ending at position e
+    best1 = [NEG] * (N + 1)
+    best1_int = [None] * (N + 1)
+    for e in range(min_w, N + 1):
+        for s in range(max(first_valid_idx, e - max_w), e - min_w + 1):
+            if (s, e) in score_cache:
+                sc = score_cache[(s, e)]
+                if sc > best1[e]:
+                    best1[e] = sc
+                    best1_int[e] = (s, e)
+    
+    # Prefix max
+    pref1 = [NEG] * (N + 1)
+    pref1_end = [None] * (N + 1)
+    for i in range(N + 1):
+        if i > 0:
+            pref1[i] = pref1[i-1]
+            pref1_end[i] = pref1_end[i-1]
+        if best1[i] > pref1[i]:
+            pref1[i] = best1[i]
+            pref1_end[i] = i
+    
+    # DP Stage 2: best pair ending at e2
+    best2 = [NEG] * (N + 1)
+    best2_pair = [None] * (N + 1)
+    for e2 in range(min_w, N + 1):
+        for s2 in range(max(first_valid_idx, e2 - max_w), e2 - min_w + 1):
+            if (s2, e2) not in score_cache:
+                continue
+            sc2 = score_cache[(s2, e2)]
+            max_e1 = s2 - gap_w
+            if max_e1 >= 0 and pref1[max_e1] > NEG:
+                total = pref1[max_e1] + sc2
+                if total > best2[e2]:
+                    best2[e2] = total
+                    e1 = pref1_end[max_e1]
+                    if e1 is not None and best1_int[e1] is not None:
+                        best2_pair[e2] = (best1_int[e1], (s2, e2))
+    
+    # Prefix max for stage 2
+    pref2 = [NEG] * (N + 1)
+    pref2_end = [None] * (N + 1)
+    for i in range(N + 1):
+        if i > 0:
+            pref2[i] = pref2[i-1]
+            pref2_end[i] = pref2_end[i-1]
+        if best2[i] > pref2[i]:
+            pref2[i] = best2[i]
+            pref2_end[i] = i
+    
+    # DP Stage 3: best triple
+    best_total = NEG
+    best_triple = None
+    for e3 in range(min_w, N + 1):
+        for s3 in range(max(first_valid_idx, e3 - max_w), e3 - min_w + 1):
+            if (s3, e3) not in score_cache:
+                continue
+            sc3 = score_cache[(s3, e3)]
+            max_e2 = s3 - gap_w
+            if max_e2 >= 0 and pref2[max_e2] > NEG:
+                total = pref2[max_e2] + sc3
+                if total > best_total:
+                    best_total = total
+                    e2 = pref2_end[max_e2]
+                    if e2 is not None and best2_pair[e2] is not None:
+                        ad1, ad2 = best2_pair[e2]
+                        best_triple = [ad1, ad2, (s3, e3)]
+    
+    if best_triple:
+        return sorted(best_triple, key=lambda x: x[0])
+    
+    # Fallback: return empty list
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Boundary refinement using breakpoint scores
 # ---------------------------------------------------------------------------
 
 def _refine_boundary(
     idx: int,
-    edge_scores: np.ndarray,
-    direction: str,  # "start" or "end"
+    breakpoint_scores: np.ndarray,
     windows: list[VisualWindow],
-    search_sec: float = 15.0,
+    direction: str,
 ) -> int:
-    """
-    Given a coarse window index, search within ±search_sec for the window
-    with the highest edge score and return that index as the refined boundary.
-
-    For "start": the boundary is the cut INTO the ad → look for the highest
-                 edge score just at/after the coarse start.
-    For "end":   the boundary is the cut OUT of the ad → look for the highest
-                 edge score just at/before the coarse end.
-    """
+    """Snap boundary to nearest local maximum in breakpoint scores."""
     N = len(windows)
-    window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
-    search_w = max(1, int(search_sec / window_sec))
-
-    if direction == "start":
-        lo = max(0, idx - search_w // 2)
-        hi = min(N, idx + search_w)
-    else:
-        lo = max(0, idx - search_w)
-        hi = min(N, idx + search_w // 2 + 1)
-
-    if lo >= hi:
+    if N == 0 or idx < 0 or idx >= N:
         return idx
-
-    best_i = lo + int(np.argmax(edge_scores[lo:hi]))
+    
+    window_sec = _get_window_sec(windows)
+    radius = max(2, int(8.0 / window_sec))
+    
+    if direction == "start":
+        lo = max(0, idx - radius // 3)
+        hi = min(N, idx + radius)
+    else:
+        lo = max(0, idx - radius)
+        hi = min(N, idx + radius // 3 + 1)
+    
+    best_i = idx
+    best_val = breakpoint_scores[idx] if idx < len(breakpoint_scores) else -1
+    for i in range(lo, hi):
+        if i < len(breakpoint_scores) and breakpoint_scores[i] > best_val:
+            best_val = breakpoint_scores[i]
+            best_i = i
+    
     return best_i
 
 
@@ -562,144 +465,151 @@ def _refine_boundary(
 # Segment building
 # ---------------------------------------------------------------------------
 
-def _make_segment_dict(label: str, start: float, end: float) -> dict[str, Any]:
+def _make_segment(label: str, start: float, end: float) -> dict[str, Any]:
     return {
         "start": round(start, 3),
-        "end":   round(end,   3),
+        "end": round(end, 3),
         "label": label,
-        "kind":  _KIND_FOR_LABEL.get(label, KIND_NON_CONTENT),
+        "kind": _KIND_FOR_LABEL.get(label, KIND_NON_CONTENT),
     }
 
 
-def _label_content_run(
+def _classify_block(
     windows: list[VisualWindow],
-    run_indices: list[int],
+    indices: list[int],
     is_before_first_ad: bool,
     is_after_last_ad: bool,
     intro_used: bool,
     outro_used: bool,
+    duration: float,
 ) -> tuple[str, bool, bool]:
-    if not run_indices:
+    """Classify a content block as Intro, Outro, Core Content, or Inactivity."""
+    if not indices:
         return LABEL_CORE_CONTENT, intro_used, outro_used
-
-    inactive = sum(
-        1 for i in run_indices
-        if windows[i].luminance_mean < 0.10 and windows[i].motion_score < 0.08
+    
+    t0 = windows[indices[0]].t0
+    t1 = windows[indices[-1]].t1
+    block_dur = t1 - t0
+    
+    # Inactivity: very dark and still
+    inactive_count = sum(
+        1 for i in indices
+        if windows[i].luminance_mean < 0.08 and windows[i].motion_score < 0.06
     )
-    if inactive > 0.6 * len(run_indices):
+    if inactive_count > 0.7 * len(indices):
         return LABEL_INACTIVITY, intro_used, outro_used
-
+    
+    # Intro: before first ad, short (< 5% of video) or starts near 0
     if is_before_first_ad and not intro_used:
-        return LABEL_INTRO, True, outro_used
-
+        if t0 < 5.0 or block_dur < duration * 0.06:
+            return LABEL_INTRO, True, outro_used
+    
+    # Outro: after last ad, short or ends near video end
     if is_after_last_ad and not outro_used:
-        return LABEL_OUTRO, intro_used, True
-
+        if t1 > duration - 5.0 or block_dur < duration * 0.15:
+            return LABEL_OUTRO, intro_used, True
+    
     return LABEL_CORE_CONTENT, intro_used, outro_used
 
 
-def _build_segments_from_ad_intervals(
+def _build_segments(
     ad_intervals: list[tuple[int, int]],
     windows: list[VisualWindow],
     duration: float,
 ) -> list[dict[str, Any]]:
+    """Build labeled segments from ad intervals."""
     N = len(windows)
-
+    if N == 0:
+        return []
+    
+    # Mark ad windows
     is_ad = [False] * N
     for s, e in ad_intervals:
-        for i in range(s, min(e, N)):
+        for i in range(max(0, s), min(e, N)):
             is_ad[i] = True
-
-    first_ad_start = ad_intervals[0][0]
-    last_ad_end    = ad_intervals[-1][1]
-
-    segments: list[dict[str, Any]] = []
+    
+    first_ad_start = ad_intervals[0][0] if ad_intervals else N
+    last_ad_end = ad_intervals[-1][1] if ad_intervals else 0
+    
+    segments = []
     intro_used = False
     outro_used = False
-
     i = 0
+    
     while i < N:
         if is_ad[i]:
             j = i
             while j < N and is_ad[j]:
                 j += 1
-            segments.append(_make_segment_dict(
+            segments.append(_make_segment(
                 LABEL_ADVERTISEMENT,
                 windows[i].t0,
-                windows[j - 1].t1,
+                windows[j-1].t1
             ))
             i = j
         else:
-            run_indices: list[int] = []
+            run = []
             j = i
             while j < N and not is_ad[j]:
-                run_indices.append(j)
+                run.append(j)
                 j += 1
-
-            is_before = run_indices[-1] < first_ad_start
-            is_after  = run_indices[0] >= last_ad_end
-
-            label, intro_used, outro_used = _label_content_run(
-                windows, run_indices,
-                is_before_first_ad=is_before,
-                is_after_last_ad=is_after,
-                intro_used=intro_used,
-                outro_used=outro_used,
+            
+            is_before = all(idx < first_ad_start for idx in run) if run else False
+            is_after = all(idx >= last_ad_end for idx in run) if run else False
+            
+            label, intro_used, outro_used = _classify_block(
+                windows, run, is_before, is_after,
+                intro_used, outro_used, duration
             )
-            segments.append(_make_segment_dict(
+            
+            segments.append(_make_segment(
                 label,
                 windows[i].t0,
-                windows[j - 1].t1,
+                windows[j-1].t1
             ))
             i = j
-
+    
     segments.sort(key=lambda s: s["start"])
-    return segments
+    
+    # Merge adjacent segments with same label
+    merged = []
+    for seg in segments:
+        if merged and merged[-1]["label"] == seg["label"]:
+            merged[-1]["end"] = seg["end"]
+        else:
+            merged.append(seg)
+    
+    return merged
 
 
-# ---------------------------------------------------------------------------
-# Legacy helpers (kept for external callers)
-# ---------------------------------------------------------------------------
-
-def _smooth_labels(
-    labels: list[str],
-    windows: list[VisualWindow],
-    min_segment_seconds: float = 12.0,
-) -> list[str]:
-    if not labels:
-        return labels
-    result = list(labels)
-
-    def _dur(start: int, lbl: str) -> float:
-        total = 0.0
-        k = start
-        while k < len(result) and result[k] == lbl:
-            total += windows[k].t1 - windows[k].t0
-            k += 1
-        return total
-
-    i = 0
-    while i < len(result):
-        if _dur(i, result[i]) < min_segment_seconds and i > 0:
-            prev = result[i - 1]
-            j = i
-            while j < len(result) and result[j] == result[i]:
-                result[j] = prev
-                j += 1
-        i += 1
-
-    i = len(result) - 1
-    while i >= 0:
-        rs = i
-        while rs > 0 and result[rs - 1] == result[i]:
-            rs -= 1
-        run_dur = sum(windows[k].t1 - windows[k].t0 for k in range(rs, i + 1))
-        if run_dur < min_segment_seconds and i < len(result) - 1:
-            nxt = result[i + 1]
-            for k in range(rs, i + 1):
-                result[k] = nxt
-        i = rs - 1
-
+def _enforce_min_duration(
+    segments: list[dict],
+    min_sec: float,
+) -> list[dict]:
+    """Absorb segments below min_sec into neighbors."""
+    if not segments:
+        return segments
+    
+    result = list(segments)
+    for _ in range(20):
+        changed = False
+        i = 0
+        while i < len(result):
+            dur = result[i]["end"] - result[i]["start"]
+            if dur < min_sec and len(result) > 1:
+                if i > 0:
+                    result[i-1]["end"] = result[i]["end"]
+                    result.pop(i)
+                elif i < len(result) - 1:
+                    result[i+1]["start"] = result[i]["start"]
+                    result.pop(i)
+                else:
+                    i += 1
+                changed = True
+            else:
+                i += 1
+        if not changed:
+            break
     return result
 
 
@@ -713,44 +623,55 @@ def fuse_bundle_to_segments(
     min_segment_seconds: float = 12.0,
     enforce_three_ads: bool = True,
 ) -> list[dict[str, Any]]:
+    """Main entry point."""
+    
     if bundle.visual is None or not bundle.visual.windows:
         return []
-
-    windows  = bundle.visual.windows
+    
+    windows = bundle.visual.windows
     duration = bundle.visual.duration_sec or bundle.duration_sec
-
-    # Compute per-window foreignness (interior signal)
-    raw_foreign = _compute_foreignness_scores(
-        windows, bundle.audio_windows, bundle.speech_spans, duration
+    window_sec = _get_window_sec(windows)
+    
+    # Compute signals
+    speech_density = _compute_speech_density_per_window(windows, bundle.speech_spans)
+    visual_disc = _compute_visual_discontinuity(windows)
+    
+    # The KEY signal: joint breakpoints where both speech and visuals change
+    breakpoint_scores = _compute_joint_breakpoint_score(
+        windows, speech_density, visual_disc, bundle.audio_windows
     )
-    smooth_foreign = _smooth(raw_foreign, SMOOTH_HALF_WIN)
-
-    # Compute per-boundary edge scores (cut signal)
-    raw_edge    = _compute_edge_scores(
-        windows, bundle.audio_windows, bundle.speech_spans, duration
+    
+    # Ad likelihood per window
+    ad_likelihood = _compute_ad_likelihood(
+        windows, speech_density, bundle.audio_windows, visual_disc, duration
     )
-    smooth_edge = _smooth(raw_edge, SMOOTH_HALF_WIN)
-
-    # Find the 3 best ad intervals using edge + interior signal
-    ad_intervals = _find_best_three_ads(smooth_edge, smooth_foreign, windows)
-
-    if ad_intervals and len(ad_intervals) == NUM_ADS:
-        # Refine each boundary to the nearest local edge maximum
-        refined: list[tuple[int, int]] = []
-        for s, e in ad_intervals:
-            rs = _refine_boundary(s, smooth_edge, "start", windows, search_sec=12.0)
-            re = _refine_boundary(e, smooth_edge, "end",   windows, search_sec=12.0)
-            # Ensure minimum duration after refinement
-            window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
-            min_w = max(1, int(AD_MIN_SEC / window_sec))
-            if re - rs < min_w:
-                re = min(len(windows), rs + min_w)
-            refined.append((rs, re))
-
-        return _build_segments_from_ad_intervals(refined, windows, duration)
-
-    # Fallback
-    return [_make_segment_dict(LABEL_CORE_CONTENT, windows[0].t0, windows[-1].t1)]
+    
+    # Smooth signals
+    smooth_w = max(1, int(3.0 / window_sec))
+    ad_smooth = _smooth(ad_likelihood, smooth_w)
+    bp_smooth = _smooth(breakpoint_scores, smooth_w)
+    
+    # Find 3 ad intervals
+    ad_intervals = _find_three_ads(ad_smooth, bp_smooth, windows)
+    
+    if not ad_intervals or len(ad_intervals) != NUM_ADS:
+        return [_make_segment(LABEL_CORE_CONTENT, windows[0].t0, windows[-1].t1)]
+    
+    # Refine boundaries
+    min_w = max(1, int(AD_MIN_SEC / window_sec))
+    refined = []
+    for s, e in ad_intervals:
+        rs = _refine_boundary(s, bp_smooth, windows, "start")
+        re = _refine_boundary(e, bp_smooth, windows, "end")
+        if rs >= re:
+            rs = max(0, re - min_w)
+        refined.append((rs, re))
+    
+    # Build segments
+    segments = _build_segments(refined, windows, duration)
+    segments = _enforce_min_duration(segments, min_segment_seconds)
+    
+    return segments
 
 
 def load_bundle(path: Path) -> AnalysisBundle:
@@ -760,9 +681,10 @@ def load_bundle(path: Path) -> AnalysisBundle:
 def write_segments_json(segments: list[dict[str, Any]], out_path: Path) -> None:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema_version": "1.0",
-        "source":         "fusion",
-        "segments":       segments,
-    }
-    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    out_path.write_text(
+        json.dumps(
+            {"schema_version": "1.0", "source": "fusion", "segments": segments},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )

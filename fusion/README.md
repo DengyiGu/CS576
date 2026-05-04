@@ -1,5 +1,4 @@
 Fusion Module
-Owner: Leena
 
 This module is the orchestration and fusion layer for the multimodal segmentation
 pipeline. It takes outputs from the visual, audio, and speech modules and produces
@@ -42,38 +41,28 @@ Step 4: Evaluate against ground truth
     PYTHONPATH=. python scripts/evaluate.py
 
 
-Recommended Run Parameters
-These parameters gave the best results across all 5 test videos:
-
-    --min-segment-sec 20    absorbs short blips, keeps real ads intact
-    --sample-fps 1.0        1 frame per second (faster than default 2.0)
-    --window-sec 2.0        2-second analysis windows (faster than default 1.0)
-
 Expected runtime per video: 10-20 minutes depending on length.
-Run videos in pairs using & to save time:
 
-    PYTHONPATH=. python -m fusion --video videos_with_ad/test_001.mp4 --out data/output/test_001_segments.json --min-segment-sec 20 --sample-fps 1.0 --window-sec 2.0 &
-    PYTHONPATH=. python -m fusion --video videos_with_ad/test_002.mp4 --out data/output/test_002_segments.json --min-segment-sec 20 --sample-fps 1.0 --window-sec 2.0 &
-    wait
+Current Evaluation Results
+==========================================================================================
+  Advertisement Detection Evaluation
+==========================================================================================
+Test        Ref Ads   Pred Ads  Ref Sec     Pred Sec    Precision   Recall    F1        Mean Seg IoU 
+------------------------------------------------------------------------------------------
+test_001    3         3         178.7s      160.0s      0.953       0.854     0.901     0.726        
+test_002    3         3         150.3s      84.0s       0.000       0.000     0.000     0.000        
+test_003    3         3         186.0s      130.0s      0.625       0.438     0.515     0.469        
+test_004    3         3         135.9s      138.0s      0.564       0.572     0.568     0.497        
+test_005    3         3         105.2s      74.0s       0.000       0.000     0.000     0.000        
+------------------------------------------------------------------------------------------
+MEAN (n=5)                                              0.429       0.373     0.397     0.338        
+==========================================================================================
 
-    PYTHONPATH=. python -m fusion --video videos_with_ad/test_003.mp4 --out data/output/test_003_segments.json --min-segment-sec 20 --sample-fps 1.0 --window-sec 2.0 &
-    PYTHONPATH=. python -m fusion --video videos_with_ad/test_004.mp4 --out data/output/test_004_segments.json --min-segment-sec 20 --sample-fps 1.0 --window-sec 2.0 &
-    wait
-
-    PYTHONPATH=. python -m fusion --video videos_with_ad/test_005.mp4 --out data/output/test_005_segments.json --min-segment-sec 20 --sample-fps 1.0 --window-sec 2.0
-
-
-Current Evaluation Results (visual + speech, no audio yet)
-    test_001    F1: 0.772    Precision: 0.769    Recall: 0.774    IoU: 0.643
-    test_002    F1: 0.109    Precision: 0.092    Recall: 0.134    IoU: 0.111
-    test_003    F1: 0.000    Precision: 0.000    Recall: 0.000    IoU: 0.000
-    test_004    F1: 0.248    Precision: 0.770    Recall: 0.147    IoU: 0.388
-    test_005    F1: 0.397    Precision: 1.000    Recall: 0.247    IoU: 0.864
-    MEAN        F1: 0.305    Precision: 0.526    Recall: 0.261    IoU: 0.401
-
-test_001 performs well. test_003 and test_005 are limited by ads with no speech
-and visually similar content (animated film, nature documentary). The audio module
-is expected to improve these significantly.
+Metrics:
+  Precision    — of predicted ad time, how much was truly an ad
+  Recall       — of reference ad time, how much did we detect
+  F1           — harmonic mean of precision and recall
+  Mean Seg IoU — average best-match IoU per predicted segment
 
 
 How Teammates Plug In
@@ -126,16 +115,6 @@ Valid labels (must match player TAXONOMY exactly):
     Content:     Core Content
     Non-content: Intro, Outro, Advertisement, Self-Promotion, Recap,
                  Transition, Inactivity, Filler
-
-
-Player Integration
-In player/player.py, run_video_segmentation has been replaced with:
-
-    from player_fusion import run_video_segmentation
-
-The patch checks data/output/<stem>_segments.json first (loads instantly if found),
-otherwise runs the full visual, speech, and fusion pipeline live and caches the result,
-and falls back to build_full_content_segment() if everything fails.
 
 
 Notes
