@@ -84,10 +84,11 @@ GAP_MIN_SEC = 60.0
 FIRST_AD_MIN_START_SEC = 30.0
 
 # Score component weights for the "foreignness" interior bonus
-W_PALETTE  = 0.40
-W_AUDIO    = 0.35
-W_NOSPEECH = 0.25
-W_VISUAL_SEMANTIC = 0.25
+W_PALETTE  = 0.00 
+W_AUDIO    = 0.50 # according to test, do 0.5
+W_NOSPEECH = 0.00
+W_VISUAL_SEMANTIC = 0.50 # according to test, do 0.5
+W_RANDOM   = 0.00 # random baseline parameter for testing
 
 # How many windows to smooth over when computing edge scores
 SMOOTH_HALF_WIN    = 2
@@ -126,10 +127,7 @@ _OUTRO_PHRASES       = _AD_PHRASES.get("outro", [])
 _INTRO_PHRASES       = _AD_PHRASES.get("intro", [])
 _RECAP_PHRASES       = _AD_PHRASES.get("recap", [])
 
-# ---------------------------------------------------------------------------
 # Per-window audio helpers
-# ---------------------------------------------------------------------------
-
 def _audio_features(
     t0: float, t1: float, audio_windows: list[AudioWindow]
 ) -> tuple[float, float]:
@@ -284,6 +282,7 @@ def _compute_foreignness_scores(
             + W_VISUAL_SEMANTIC * visual_semantic
             + W_AUDIO  * audio_score
             + W_NOSPEECH * nospeech_score
+            + W_RANDOM * np.random.rand()
         )
 
     return scores
@@ -418,9 +417,7 @@ def _find_best_three_ads(
 
     NEG_INF = float("-inf")
 
-    # ------------------------------------------------------------------
     # Stage 1: best single ad ending at each index e
-    # ------------------------------------------------------------------
     b1s  = np.full(N + 1, NEG_INF, dtype=np.float64)
     b1st = np.full(N + 1, -1,      dtype=np.int32)
 
@@ -683,10 +680,7 @@ def _build_segments_from_ad_intervals(
     return segments
 
 
-# ---------------------------------------------------------------------------
 # Legacy helpers (kept for external callers)
-# ---------------------------------------------------------------------------
-
 def _smooth_labels(
     labels: list[str],
     windows: list[VisualWindow],
@@ -729,9 +723,7 @@ def _smooth_labels(
     return result
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def fuse_bundle_to_segments(
     bundle: AnalysisBundle,
