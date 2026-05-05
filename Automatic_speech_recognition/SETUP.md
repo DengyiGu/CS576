@@ -39,7 +39,8 @@ video path        Required for transcription. Path to the local video file.
 --compute-type    CPU compute type for faster-whisper. Default: int8.
                   Common choices: int8, int16, float32.
 --language        Transcription language code. Default: en.
---vad             Enables voice activity detection. Default: off. VAD can speed up transcription by skipping non-speech sections, but it may miss some imformation. Leave it off when accuracy is more important.
+--vad             Enables voice activity detection. Default: on.
+--no-vad          Disables voice activity detection. This can keep slightly more speech, but runs slower.
 --model-dir       Optional custom directory for the selected local model. The default directory is: Automatic_speech_recognition/models/faster-whisper-<model>
 ```
 
@@ -51,7 +52,7 @@ Automatic_speech_recognition/models/faster-whisper-small
 
 Examples:
 
-Run transcription with default options (`--model small`, `--language en`, VAD off):
+Run transcription with default options (`--model small`, `--language en`, VAD on):
 
 ```bash
 python Automatic_speech_recognition/segment_text_analyzer.py videos_with_ad/test_001.mp4
@@ -69,10 +70,10 @@ Run transcription with a different language:
 python Automatic_speech_recognition/segment_text_analyzer.py videos_with_ad/test_001.mp4 --language zh
 ```
 
-Run transcription with VAD enabled:
+Run transcription with VAD disabled:
 
 ```bash
-python Automatic_speech_recognition/segment_text_analyzer.py videos_with_ad/test_001.mp4 --vad
+python Automatic_speech_recognition/segment_text_analyzer.py videos_with_ad/test_001.mp4 --no-vad
 ```
 
 Notes:
@@ -81,4 +82,3 @@ Notes:
 - `pydantic` is required because the shared fusion schema defines `SpeechSpan` with Pydantic.
 - `huggingface_hub` is only needed to download the selected model during setup.
 - `build_speech_spans(video_path)` returns `list[SpeechSpan]`, where each item has `t0`, `t1`, and `text`.
-

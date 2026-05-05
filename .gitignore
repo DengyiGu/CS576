@@ -230,3 +230,9 @@ __marimo__/
 
 # Local ASR models are downloaded during setup and should not be committed
 /Automatic_speech_recognition/models/
+
+# Local OCR models are downloaded during setup and should not be committed
+/ocr/models/
+
+# Local semantic text models are downloaded during setup and should not be committed
+/semantic/models/

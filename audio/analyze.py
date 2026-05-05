@@ -339,16 +339,52 @@ def _robust_normalize(values: np.ndarray, low_q: float = 0.1, high_q: float = 0.
 
 
 def _anomaly_scores(features: list[_WindowFeatures]) -> list[float]:
-    """Distance of each window's MFCC mean from the global median, robustly normalized."""
+    """Robust audio oddity score used by fusion for ad candidates.
+
+    Ads often differ from the surrounding content not only in MFCC texture but
+    also in loudness, spectral centroid/rolloff, and noisiness. Combining these
+    signals makes music-only or no-dialog ads easier to separate from normal
+    static content.
+    """
     if not features:
         return []
+
+    def _normalized_deviation(values: np.ndarray, high_q: float = 0.95) -> np.ndarray:
+        if values.size == 0:
+            return values
+        median = float(np.median(values))
+        deviation = np.abs(values - median)
+        hi = float(np.quantile(deviation, high_q))
+        if hi <= 1e-9:
+            return np.zeros_like(values, dtype=np.float32)
+        return np.clip(deviation / hi, 0.0, 1.0).astype(np.float32)
+
     mfcc_matrix = np.stack([f.mfcc_mean for f in features], axis=0).astype(np.float32)
     median = np.median(mfcc_matrix, axis=0, keepdims=True)
     mad = np.median(np.abs(mfcc_matrix - median), axis=0, keepdims=True) + 1e-6
     standardized = (mfcc_matrix - median) / (1.4826 * mad)
-    raw = np.linalg.norm(standardized, axis=1)
-    normalized = _robust_normalize(raw, low_q=0.5, high_q=0.95)
-    return [float(v) for v in normalized.tolist()]
+    mfcc_norm = _robust_normalize(np.linalg.norm(standardized, axis=1), low_q=0.5, high_q=0.95)
+
+    rms_norm = _normalized_deviation(np.array([f.rms_db for f in features], dtype=np.float32))
+    centroid_norm = _normalized_deviation(np.array([f.centroid_hz for f in features], dtype=np.float32))
+    rolloff_norm = _normalized_deviation(np.array([f.rolloff_hz for f in features], dtype=np.float32))
+    flatness_norm = _normalized_deviation(np.array([f.flatness for f in features], dtype=np.float32))
+    zcr_norm = _normalized_deviation(np.array([f.zcr_mean for f in features], dtype=np.float32))
+
+    combined = (
+        0.50 * mfcc_norm
+        + 0.18 * rms_norm
+        + 0.12 * centroid_norm
+        + 0.08 * rolloff_norm
+        + 0.07 * flatness_norm
+        + 0.05 * zcr_norm
+    )
+
+    for idx, feature in enumerate(features):
+        if feature.rms_db <= _SILENCE_DB:
+            combined[idx] *= 0.35
+
+    return [float(v) for v in np.clip(combined, 0.0, 1.0).tolist()]
 
 
 def build_audio_windows(
