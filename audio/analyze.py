@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import subprocess
 import tempfile
 import wave
@@ -69,9 +70,21 @@ class _WindowFeatures:
     mfcc_mean: np.ndarray
 
 
+def _resolve_ffmpeg_executable() -> str:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+
+    repo_local = Path(__file__).resolve().parents[1] / "data" / "bin" / "ffmpeg.exe"
+    if repo_local.is_file():
+        return str(repo_local)
+
+    return "ffmpeg"
+
+
 def _ffmpeg_extract_wav(video_path: Path, wav_out: Path, sample_rate: int) -> None:
     command = [
-        "ffmpeg",
+        _resolve_ffmpeg_executable(),
         "-y",
         "-loglevel",
         "error",
