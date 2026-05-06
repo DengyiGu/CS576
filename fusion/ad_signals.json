@@ -153,6 +153,49 @@
       "last time", "last episode", "previously", "as we discussed",
       "as i mentioned", "in the previous", "recap", "to recap",
       "as you may remember", "if you missed", "in case you missed"
+    ],
+    "tv_ad_imperative": [
+      "try it", "try our", "get yours", "order today", "order now",
+      "buy now", "shop now", "visit your local", "call now",
+      "save now", "discover the", "experience the", "introducing the",
+      "available now", "available today", "in stores now",
+      "ask your doctor", "tell your doctor", "ask your pharmacist",
+      "switch to", "trust the", "the all new", "now with"
+    ],
+    "tv_ad_deal": [
+      "free trial", "limited time", "limited time offer",
+      "today only", "this week only", "no purchase necessary",
+      "for a limited time", "while supplies last", "offer ends",
+      "ends soon", "lowest prices", "best price", "starting at",
+      "as low as", "now only", "% off", "percent off",
+      "save up to", "buy one get one"
+    ],
+    "tv_ad_tagline": [
+      "the official", "america's number one", "america's favorite",
+      "the original", "the only", "trusted by", "trusted for",
+      "voted best", "the leader in", "the new"
+    ],
+    "tv_ad_compliance": [
+      "side effects may include", "may cause", "see store for details",
+      "terms apply", "terms and conditions apply", "results may vary",
+      "professional driver on a closed course", "closed course",
+      "do not exceed", "consult your doctor", "consult a physician",
+      "if symptoms persist", "stop use if", "warning",
+      "use only as directed", "see package for details",
+      "tax title license", "fuel economy", "based on epa estimates"
+    ],
+    "tv_ad_pricing": [
+      "for just", "only ninety nine", "nineteen ninety nine",
+      "twenty nine ninety nine", "ninety nine cents", "plus shipping",
+      "plus tax", "plus s and h", "money back guarantee", "satisfaction guaranteed"
     ]
-  }
+  },
+  "ambiguous_brands": [
+    "max", "secret", "prime", "target", "apple", "discover", "wish",
+    "teams", "frontier", "coke", "ring", "nest", "gap", "off",
+    "free", "kind", "native", "factor", "calm", "axe", "tide",
+    "dove", "monster", "dish", "spirit", "spectrum", "honey",
+    "dell", "hp", "lg", "kraft", "secret", "nature valley",
+    "amazon", "google", "microsoft", "apple tv", "ford", "windows"
+  ]
 }

@@ -1,7 +1,16 @@
 from __future__ import annotations
 
-from schemas.modality import AnalysisBundle, AudioWindow, VisualTrack, VisualWindow
-from fusion.fuse import fuse_bundle_to_segments
+from schemas.modality import AnalysisBundle, AudioWindow, SpeechSpan, VisualTrack, VisualWindow
+from fusion.fuse import (
+    _compute_transcript_density_baseline,
+    _count_brand_hits,
+    _count_lexicon_hits,
+    _has_sponsorship_phrase,
+    _loudness_jump_score,
+    _speech_text_ad_signal,
+    _transcript_density_score,
+    fuse_bundle_to_segments,
+)
 
 
 def _window_is_inside_any(t0: float, t1: float, intervals: list[tuple[float, float]]) -> bool:
@@ -99,3 +108,133 @@ def test_fusion_uses_visual_semantics_when_palette_delta_is_subtle() -> None:
         overlap = max(0.0, min(pred["end"], ref[1]) - max(pred["start"], ref[0]))
         ref_duration = ref[1] - ref[0]
         assert overlap / ref_duration >= 0.70
+
+
+# ---------------------------------------------------------------------------
+# Brand matching with word boundaries
+# ---------------------------------------------------------------------------
+
+def test_brand_match_uses_word_boundaries_no_substring_false_positives() -> None:
+    # 'apple' must not fire on 'applesauce'; 'max' must not fire on 'climaxed';
+    # 'discover' must not fire on 'discovered'; 'coke' must not fire on 'jacoke'.
+    safe, ambig, distinct = _count_brand_hits(
+        "applesauce climaxed discovered jacoke offhand naturopath"
+    )
+    assert distinct == []
+    assert safe == 0
+    assert ambig == 0
+
+
+def test_brand_match_word_boundary_positive_cases() -> None:
+    safe, ambig, _ = _count_brand_hits("i love doritos and hellofresh today")
+    assert safe >= 2  # both are non-ambiguous
+    assert ambig == 0
+
+
+def test_ambiguous_brand_alone_does_not_fire_speech_signal() -> None:
+    # 'discover' and 'apple' are both in the ambiguous list; on their own
+    # the word should not push the score above zero.
+    spans = [SpeechSpan(t0=10.0, t1=12.0, text="to discover unexpected wonders")]
+    assert _speech_text_ad_signal(10.0, 12.0, spans) == 0.0
+    spans = [SpeechSpan(t0=10.0, t1=12.0, text="i bit into the apple")]
+    assert _speech_text_ad_signal(10.0, 12.0, spans) == 0.0
+
+
+def test_safe_brand_alone_fires_low_signal() -> None:
+    spans = [SpeechSpan(t0=10.0, t1=12.0, text="want a doritos")]
+    score = _speech_text_ad_signal(10.0, 12.0, spans)
+    assert 0.40 <= score <= 0.55  # safe brand single-hit tier
+
+
+# ---------------------------------------------------------------------------
+# TV-ad lexicon
+# ---------------------------------------------------------------------------
+
+def test_lexicon_imperative_alone_fires() -> None:
+    n_cat, by_cat = _count_lexicon_hits("call now to order today")
+    assert n_cat >= 1
+    assert "tv_ad_imperative" in by_cat
+
+
+def test_lexicon_compliance_phrase_fires_strongly_via_text_signal() -> None:
+    # Compliance disclaimers ("side effects may include") essentially never
+    # appear in non-ad speech, so two-category language should hit the
+    # multi-category tier.
+    spans = [
+        SpeechSpan(
+            t0=100.0,
+            t1=115.0,
+            text=(
+                "side effects may include nausea. ask your doctor "
+                "if it is right for you."
+            ),
+        )
+    ]
+    score = _speech_text_ad_signal(100.0, 115.0, spans)
+    assert score >= 0.85  # 2+ categories tier
+
+
+def test_sponsorship_phrase_still_dominates() -> None:
+    spans = [SpeechSpan(t0=10.0, t1=12.0, text="this episode is brought to you by")]
+    assert _has_sponsorship_phrase("this episode is brought to you by")
+    assert _speech_text_ad_signal(10.0, 12.0, spans) >= 0.95
+
+
+# ---------------------------------------------------------------------------
+# Transcript-density-drop helper
+# ---------------------------------------------------------------------------
+
+def test_transcript_density_baseline_uses_global_average() -> None:
+    # 600 total chars over 60 seconds -> 10 chars/s baseline.
+    spans = [
+        SpeechSpan(t0=0.0, t1=10.0, text="x" * 100),
+        SpeechSpan(t0=20.0, t1=30.0, text="y" * 200),
+        SpeechSpan(t0=50.0, t1=60.0, text="z" * 300),
+    ]
+    baseline = _compute_transcript_density_baseline(spans, duration_sec=60.0)
+    assert 9.0 <= baseline <= 11.0
+
+
+def test_transcript_density_score_high_when_window_is_quiet() -> None:
+    # Steady speech everywhere except a 30 s gap.
+    spans: list[SpeechSpan] = []
+    for start in range(0, 240, 5):
+        spans.append(SpeechSpan(t0=float(start), t1=float(start + 4), text="x" * 40))
+    # Drop a quiet stretch at [120, 150].
+    spans = [s for s in spans if not (120.0 <= s.t0 < 150.0)]
+    baseline = _compute_transcript_density_baseline(spans, duration_sec=240.0)
+    quiet = _transcript_density_score(125.0, 145.0, spans, baseline_chars_per_sec=baseline)
+    busy = _transcript_density_score(20.0, 40.0, spans, baseline_chars_per_sec=baseline)
+    assert quiet >= 0.6
+    assert busy <= 0.2
+
+
+# ---------------------------------------------------------------------------
+# Loudness-jump helper
+# ---------------------------------------------------------------------------
+
+def _audio_steps(low_db: float, high_db: float, switch_sec: float, *, duration_sec: float = 60.0) -> list[AudioWindow]:
+    out: list[AudioWindow] = []
+    for t in range(int(duration_sec)):
+        rms_db = high_db if t >= switch_sec else low_db
+        out.append(AudioWindow(t0=float(t), t1=float(t + 1), rms_db=float(rms_db)))
+    return out
+
+
+def test_loudness_jump_high_on_8db_step() -> None:
+    audio = _audio_steps(low_db=-30.0, high_db=-22.0, switch_sec=30.0)
+    score = _loudness_jump_score(30.0, audio, half_sec=10.0, edge_skip_sec=1.0)
+    # 8 dB step is the reference -> should land near 1.0
+    assert 0.85 <= score <= 1.0
+
+
+def test_loudness_jump_low_when_no_step() -> None:
+    audio = _audio_steps(low_db=-30.0, high_db=-30.0, switch_sec=30.0)
+    score = _loudness_jump_score(30.0, audio, half_sec=10.0, edge_skip_sec=1.0)
+    assert score <= 0.05
+
+
+def test_loudness_jump_zero_when_no_data_around_boundary() -> None:
+    # Boundary far past the audio — both sides empty.
+    audio = _audio_steps(low_db=-30.0, high_db=-22.0, switch_sec=30.0, duration_sec=60.0)
+    assert _loudness_jump_score(500.0, audio) == 0.0
