@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import math
-import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from time import monotonic, sleep
+from time import monotonic
 from typing import Any
+from player.segments import EPSILON_SECONDS, TIMELINE_TRACK_SIDE_PADDING, Segment
 from player_fusion import run_video_segmentation
 
 try:
@@ -45,170 +44,6 @@ except ImportError as exc:
     raise SystemExit(
         "PySide6 is required for the desktop player. Install it with: python -m pip install PySide6"
     ) from exc
-
-
-TAXONOMY = [
-    {
-        "label": "Core Content",
-        "kind": "content",
-        "color": "#2f9e44",
-    },
-    {
-        "label": "Intro",
-        "kind": "non-content",
-        "color": "#1c7ed6",
-    },
-    {
-        "label": "Outro",
-        "kind": "non-content",
-        "color": "#495057",
-    },
-    {
-        "label": "Advertisement",
-        "kind": "non-content",
-        "color": "#c92a2a",
-    },
-    {
-        "label": "Self-Promotion",
-        "kind": "non-content",
-        "color": "#e67700",
-    },
-    {
-        "label": "Recap",
-        "kind": "non-content",
-        "color": "#f08c00",
-    },
-    {
-        "label": "Transition",
-        "kind": "non-content",
-        "color": "#5f3dc4",
-    },
-    {
-        "label": "Inactivity",
-        "kind": "non-content",
-        "color": "#868e96",
-    },
-    {
-        "label": "Filler",
-        "kind": "non-content",
-        "color": "#a61e4d",
-    },
-]
-EPSILON_SECONDS = 0.04
-TIMELINE_TRACK_SIDE_PADDING = 9
-
-
-@dataclass
-class Segment:
-    identifier: str
-    start: float
-    end: float
-    label_name: str
-    kind: str
-    color: str
-
-    @property
-    def duration(self) -> float:
-        return max(0.0, self.end - self.start)
-
-
-def taxonomy_item_for_label(label_name: str) -> dict[str, str] | None:
-    for item in TAXONOMY:
-        if item["label"] == label_name:
-            return item
-    return None
-
-
-def build_segment_from_payload(payload: dict[str, Any], index: int) -> Segment | None:
-    try:
-        start = float(payload["start"])
-        end = float(payload["end"])
-    except (KeyError, TypeError, ValueError):
-        return None
-
-    if end <= start:
-        return None
-
-    label_name = str(payload.get("label") or "Core Content")
-    taxonomy_item = taxonomy_item_for_label(label_name) or {
-        "label": label_name,
-        "kind": str(payload.get("kind") or "non-content"),
-        "color": "#868e96",
-    }
-
-    return Segment(
-        identifier=str(payload.get("id") or f"segment-{index}-{int(start * 1000)}-{int(end * 1000)}"),
-        start=start,
-        end=end,
-        label_name=str(taxonomy_item["label"]),
-        kind=str(payload.get("kind") or taxonomy_item["kind"]),
-        color=str(payload.get("color") or taxonomy_item["color"]),
-    )
-
-
-def build_full_content_segment(duration_seconds: float) -> list[Segment]:
-    if duration_seconds <= 0:
-        raise ValueError("Video duration must be positive before building segments.")
-
-    segments: list[Segment] = []
-    demo_label_order = [
-        "Intro",
-        "Core Content",
-        "Advertisement",
-        "Core Content",
-        "Recap",
-        "Core Content",
-        "Transition",
-        "Core Content",
-        "Self-Promotion",
-        "Core Content",
-        "Inactivity",
-        "Core Content",
-        "Filler",
-        "Outro",
-    ]
-    total_labels = len(demo_label_order)
-    for index, label_name in enumerate(demo_label_order):
-        item = taxonomy_item_for_label(label_name)
-        if item is None:
-            raise ValueError(f"Unknown demo segment label: {label_name}")
-        start = duration_seconds * index / total_labels
-        end = duration_seconds * (index + 1) / total_labels
-        payload = {
-            "id": f"segment-{index}",
-            "start": start,
-            "end": end,
-            "label": item["label"],
-            "kind": item["kind"],
-            "color": item["color"],
-        }
-        segment = build_segment_from_payload(payload, index)
-        if segment is not None:
-            segments.append(segment)
-    return segments
-
-
-def probe_video_duration_seconds(path: Path) -> float:
-    duration_seconds = float(
-        subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-    )
-    if duration_seconds <= 0:
-        raise ValueError(f"Unable to determine a positive duration for {path.name}.")
-    return duration_seconds
 
 
 def format_time(total_seconds: float) -> str:
@@ -522,6 +357,7 @@ class PlayerWindow(QMainWindow):
         self.processing_overlay_visible = False
         self.processing_thread: QThread | None = None
         self.processing_worker: SegmentationWorker | None = None
+        self.is_closing = False
 
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(0.85)
@@ -784,11 +620,12 @@ class PlayerWindow(QMainWindow):
 
     def _build_processing_overlay(self) -> None:
         self.processing_overlay = QFrame(
-            self.video_widget,
-            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint,
+            self,
+            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint,
         )
         self.processing_overlay.setObjectName("processingOverlay")
         self.processing_overlay.hide()
+        self.processing_overlay.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
         layout = QVBoxLayout(self.processing_overlay)
         layout.setContentsMargins(22, 18, 22, 18)
@@ -1386,6 +1223,8 @@ class PlayerWindow(QMainWindow):
         QTimer.singleShot(0, self.process_current_video)
 
     def on_processing_finished(self, segments: object) -> None:
+        if self.is_closing:
+            return
         if not isinstance(segments, list):
             self.on_processing_failed("Segmentation returned an invalid result.")
             return
@@ -1396,6 +1235,8 @@ class PlayerWindow(QMainWindow):
         self.hide_processing_overlay()
 
     def on_processing_failed(self, message: str) -> None:
+        if self.is_closing:
+            return
         self.clear_current_segments()
         self.hide_processing_overlay()
         self.show_error(f"Video processing failed: {message}")
@@ -1827,13 +1668,32 @@ class PlayerWindow(QMainWindow):
         QMessageBox.warning(self, "Player Error", message)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        if self.processing_thread is not None:
-            self.statusBar().showMessage("Processing is still running. Please wait for it to finish.", 4000)
-            event.ignore()
-            return
+        self.is_closing = True
         if self.is_fullscreen_active():
             self.exit_fullscreen()
+        self.player.stop()
+        if self.processing_thread is not None:
+            try:
+                self.processing_worker.finished.disconnect()
+                self.processing_worker.failed.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            self.processing_thread.requestInterruption()
+            self.processing_thread.quit()
+            if not self.processing_thread.wait(300):
+                self.processing_thread.terminate()
+                self.processing_thread.wait(800)
         super().closeEvent(event)
+
+    def moveEvent(self, event) -> None:  # type: ignore[override]
+        super().moveEvent(event)
+        self.update_processing_overlay_geometry()
+        self.update_fullscreen_overlay_geometry()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self.update_processing_overlay_geometry()
+        self.update_fullscreen_overlay_geometry()
 
     def _sync_position_sliders(self, value: int, exclude: PositionSlider | None = None) -> None:
         bounded_value = self.clamp_seek_milliseconds(value)

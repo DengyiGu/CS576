@@ -2,7 +2,6 @@
 CLI entry point for the fusion pipeline.
 
 Two modes:
-
   Bundle mode (fast, for iteration after visual analysis is already done):
     python -m fusion --bundle data/output/test_001_analysis_bundle.json
 
@@ -27,6 +26,74 @@ from pathlib import Path
 from fusion.fuse import fuse_bundle_to_segments, load_bundle, write_segments_json
 
 
+def _has_text_source(bundle, source: str) -> bool:
+    return any((span.model_extra or {}).get("source") == source for span in bundle.speech_spans)
+
+
+def _try_add_ocr(bundle, video: Path, *, use_cuda_text_models: bool = False) -> None:
+    if bundle.visual is None or not bundle.visual.windows:
+        return
+    if _has_text_source(bundle, "ocr"):
+        print("[fusion] OCR spans already present; skipping OCR.")
+        return
+    try:
+        from ocr.analyze import build_ocr_spans
+        candidate_times = [
+            0.5 * (window.t0 + window.t1)
+            for window in bundle.visual.windows
+            if (
+                window.high_text_density
+                or window.visual_hypothesis in {"graphics_heavy", "static"}
+                or window.palette_delta > 0.35
+            )
+        ]
+        device_name = "cuda" if use_cuda_text_models else "cpu"
+        print(f"[fusion] Running OCR on {video.name} ({device_name}) ...")
+        ocr_spans = build_ocr_spans(
+            video,
+            candidate_times=candidate_times,
+            sample_every_sec=10.0,
+            max_frames=260,
+            gpu=use_cuda_text_models,
+        )
+        bundle.speech_spans.extend(ocr_spans)
+        print(f"[fusion] Got {len(ocr_spans)} OCR text spans.")
+    except Exception as e:
+        print(f"[fusion] OCR unavailable, running without: {e}")
+
+
+def _try_add_semantic_text_scores(bundle, *, use_cuda_text_models: bool = False) -> None:
+    if not bundle.speech_spans:
+        return
+    try:
+        from semantic.analyze import build_semantic_ad_spans, build_semantic_structure_spans
+
+        device_name = "cuda" if use_cuda_text_models else "cpu"
+        if _has_text_source(bundle, "semantic"):
+            print("[fusion] Semantic ad scores already present; skipping ad semantic scoring.")
+        else:
+            print(f"[fusion] Running semantic ad scoring on {len(bundle.speech_spans)} text spans ({device_name}) ...")
+            semantic_spans = build_semantic_ad_spans(
+                bundle.speech_spans,
+                device="cuda" if use_cuda_text_models else "cpu",
+            )
+            bundle.speech_spans.extend(semantic_spans)
+            print(f"[fusion] Got {len(semantic_spans)} semantic ad spans.")
+
+        if _has_text_source(bundle, "semantic_structure"):
+            print("[fusion] Semantic structure scores already present; skipping structure semantic scoring.")
+        else:
+            print(f"[fusion] Running semantic structure scoring on {len(bundle.speech_spans)} text spans ({device_name}) ...")
+            structure_spans = build_semantic_structure_spans(
+                bundle.speech_spans,
+                device="cuda" if use_cuda_text_models else "cpu",
+            )
+            bundle.speech_spans.extend(structure_spans)
+            print(f"[fusion] Got {len(structure_spans)} semantic structure spans.")
+    except Exception as e:
+        print(f"[fusion] Semantic text scoring unavailable, running without: {e}")
+
+
 def _run_visual_and_fuse(
     video: Path,
     *,
@@ -36,8 +103,14 @@ def _run_visual_and_fuse(
     window_sec: float,
     min_segment_seconds: float,
     skip_speech: bool = False,
+    use_cuda_text_models: bool = False,
+    asr_device: str = "cpu",
+    asr_compute_type: str = "int8",
+    asr_vad: bool = True,
 ) -> int:
-    """Run visual analysis, optionally speech recognition, then fuse."""
+    """
+    Run visual analysis, optionally speech recognition, then fuse.
+    """
     try:
         from visual.analyze import analyze_visual, build_analysis_bundle, write_analysis_bundle_json
     except ImportError as exc:
@@ -54,14 +127,35 @@ def _run_visual_and_fuse(
     print(f"[fusion] Running visual analysis on {video.name} ...")
     bundle = build_analysis_bundle(video, track=analyze_visual(video, sample_fps=sample_fps, window_sec=window_sec))
 
+    # Wire in audio analysis
+    try:
+        from audio.analyze import analyze_audio
+        print(f"[fusion] Running audio analysis on {video.name} ...")
+        audio_windows, _ = analyze_audio(video_path=video, window_sec=window_sec)
+        bundle.audio_windows = audio_windows
+        print(f"[fusion] Got {len(audio_windows)} audio windows.")
+    except Exception as e:
+        print(f"[fusion] Audio analysis unavailable, running without: {e}")
+
     if not skip_speech:
         try:
             from Automatic_speech_recognition.segment_text_analyzer import build_speech_spans
-            print(f"[fusion] Running speech recognition on {video.name} ...")
-            bundle.speech_spans = build_speech_spans(video)
+            print(
+                f"[fusion] Running speech recognition on {video.name} "
+                f"({asr_device}, {asr_compute_type}, vad={asr_vad}) ..."
+            )
+            bundle.speech_spans = build_speech_spans(
+                video,
+                device=asr_device,
+                compute_type=asr_compute_type,
+                vad=asr_vad,
+            )
             print(f"[fusion] Got {len(bundle.speech_spans)} speech spans.")
         except Exception as e:
             print(f"[fusion] Speech recognition unavailable, running without: {e}")
+
+    _try_add_ocr(bundle, video, use_cuda_text_models=use_cuda_text_models)
+    _try_add_semantic_text_scores(bundle, use_cuda_text_models=use_cuda_text_models)
 
     if bundle_out is not None:
         write_analysis_bundle_json(bundle, bundle_out.resolve())
@@ -162,6 +256,35 @@ def main(argv: list[str] | None = None) -> int:
         default=4.0,
         help="Segments shorter than this get absorbed by neighbors (default 4.0, recommend 20.0).",
     )
+    parser.add_argument(
+        "--cuda-text-models",
+        action="store_true",
+        default=False,
+        help="Run OCR and semantic text scoring on CUDA if your local CUDA/PyTorch setup supports it.",
+    )
+    parser.add_argument(
+        "--asr-device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="Speech recognition device for faster-whisper (default cpu).",
+    )
+    parser.add_argument(
+        "--asr-compute-type",
+        default="int8",
+        help="Speech recognition compute type, such as int8, int8_float16, float16, or float32.",
+    )
+    parser.add_argument(
+        "--asr-vad",
+        action="store_true",
+        default=True,
+        help="Enable VAD for speech recognition in end-to-end video mode (default on).",
+    )
+    parser.add_argument(
+        "--no-asr-vad",
+        action="store_false",
+        dest="asr_vad",
+        help="Disable VAD for speech recognition.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -180,6 +303,10 @@ def main(argv: list[str] | None = None) -> int:
             window_sec=args.window_sec,
             min_segment_seconds=args.min_segment_sec,
             skip_speech=args.skip_speech,
+            use_cuda_text_models=args.cuda_text_models,
+            asr_device=args.asr_device,
+            asr_compute_type=args.asr_compute_type,
+            asr_vad=args.asr_vad,
         )
 
     # Bundle mode: load pre-computed bundle, optionally add speech, then fuse
@@ -199,6 +326,21 @@ def main(argv: list[str] | None = None) -> int:
         print("Error: bundle contains no visual windows. Re-run visual_analyze first.", file=sys.stderr)
         return 1
 
+    # Try to add audio if the bundle doesn't already have it
+    if not bundle.audio_windows:
+        video_path_str = bundle.video_path
+        if video_path_str:
+            video_for_audio = Path(video_path_str)
+            if video_for_audio.is_file():
+                try:
+                    from audio.analyze import analyze_audio
+                    print(f"[fusion] Running audio analysis on {video_for_audio.name} ...")
+                    audio_windows, _ = analyze_audio(video_path=video_for_audio, window_sec=args.window_sec)
+                    bundle.audio_windows = audio_windows
+                    print(f"[fusion] Got {len(audio_windows)} audio windows.")
+                except Exception as e:
+                    print(f"[fusion] Audio analysis unavailable, running without: {e}")
+
     # Try to add speech if the bundle doesn't already have it
     if not args.skip_speech and not bundle.speech_spans:
         video_path_str = bundle.video_path
@@ -207,11 +349,27 @@ def main(argv: list[str] | None = None) -> int:
             if video_for_speech.is_file():
                 try:
                     from Automatic_speech_recognition.segment_text_analyzer import build_speech_spans
-                    print(f"[fusion] Running speech recognition on {video_for_speech.name} ...")
-                    bundle.speech_spans = build_speech_spans(video_for_speech)
+                    print(
+                        f"[fusion] Running speech recognition on {video_for_speech.name} "
+                        f"({args.asr_device}, {args.asr_compute_type}, vad={args.asr_vad}) ..."
+                    )
+                    bundle.speech_spans = build_speech_spans(
+                        video_for_speech,
+                        device=args.asr_device,
+                        compute_type=args.asr_compute_type,
+                        vad=args.asr_vad,
+                    )
                     print(f"[fusion] Got {len(bundle.speech_spans)} speech spans.")
                 except Exception as e:
                     print(f"[fusion] Speech recognition unavailable, running without: {e}")
+
+    video_path_str = bundle.video_path
+    if video_path_str:
+        video_for_ocr = Path(video_path_str)
+        if video_for_ocr.is_file():
+            _try_add_ocr(bundle, video_for_ocr, use_cuda_text_models=args.cuda_text_models)
+
+    _try_add_semantic_text_scores(bundle, use_cuda_text_models=args.cuda_text_models)
 
     n_audio = len(bundle.audio_windows)
     n_speech = len(bundle.speech_spans)

@@ -146,7 +146,10 @@ def _hypothesis_from_features(
     motion: float,
     edge_d: float,
     palette_d: float,
+    text_like: float = 0.0,
 ) -> tuple[VisualHypothesis, float]:
+    if text_like > 0.55 and edge_d > 0.35:
+        return "graphics_heavy", min(1.0, 0.50 + max(text_like, edge_d) * 0.45)
     if motion < 0.12 and edge_d < 0.25:
         return "static", min(1.0, 0.55 + (0.12 - motion) * 2.0)
     if edge_d > 0.45 or palette_d > 0.55:
@@ -195,10 +198,36 @@ class _WindowRaw:
     motion_raw: float
     luminance_mean: float
     edge_raw: float
+    text_like_raw: float
     palette_vs_ema_raw: float
     shot_boundary_near: bool
     shot_boundary_distance_sec: float | None
     mean_hist: np.ndarray
+
+
+def _estimate_text_like_density(gray: np.ndarray, edges_map: np.ndarray) -> float:
+    """Estimate caption/title/product-text density without running OCR."""
+    h, w = gray.shape[:2]
+    if h <= 0 or w <= 0:
+        return 0.0
+
+    kernel_w = max(5, w // 45)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, 2))
+    merged = cv2.dilate(edges_map, kernel, iterations=1)
+    contours, _hierarchy = cv2.findContours(merged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    text_area = 0.0
+    frame_area = float(h * w)
+    for contour in contours:
+        x, y, cw, ch = cv2.boundingRect(contour)
+        if cw < 5 or ch < 3:
+            continue
+        aspect = cw / max(ch, 1)
+        rel_area = (cw * ch) / frame_area
+        if 1.2 <= aspect <= 28.0 and 0.00005 <= rel_area <= 0.08:
+            text_area += cw * ch
+
+    return float(min(1.0, (text_area / frame_area) * 8.0))
 
 
 def _compute_window_raw(
@@ -214,6 +243,7 @@ def _compute_window_raw(
     motions: list[float] = []
     lums: list[float] = []
     edges: list[float] = []
+    text_like_scores: list[float] = []
     hist_sum: np.ndarray | None = None
     hist_count = 0
     prev_gray: np.ndarray | None = None
@@ -226,6 +256,7 @@ def _compute_window_raw(
         lums.append(float(np.mean(gray)) / 255.0)
         edges_map = cv2.Canny(gray, 60, 140)
         edges.append(float(np.mean(edges_map > 0)))
+        text_like_scores.append(_estimate_text_like_density(gray, edges_map))
         hvec = _small_bgr_hist(small)
         hist_sum = hvec if hist_sum is None else hist_sum + hvec
         hist_count += 1
@@ -237,6 +268,7 @@ def _compute_window_raw(
     motion_raw = float(np.mean(motions)) if motions else 0.0
     lum_mean = float(np.mean(lums)) if lums else 0.0
     edge_mean = float(np.mean(edges)) if edges else 0.0
+    text_like_mean = float(np.mean(text_like_scores)) if text_like_scores else 0.0
     mean_hist = (hist_sum / max(1, hist_count)) if hist_sum is not None else np.zeros(_HIST_SIZE, dtype=np.float64)
     if hist_ema is None:
         palette_vs_ema = 0.0
@@ -253,6 +285,7 @@ def _compute_window_raw(
         motion_raw=motion_raw,
         luminance_mean=lum_mean,
         edge_raw=edge_mean,
+        text_like_raw=text_like_mean,
         palette_vs_ema_raw=palette_vs_ema,
         shot_boundary_near=boundary_near,
         shot_boundary_distance_sec=dist,
@@ -343,16 +376,19 @@ def analyze_visual(
 
         motion_vals: list[float] = []
         edge_vals: list[float] = []
+        text_vals: list[float] = []
         pal_vals: list[float] = []
         vi = 0
         nv = len(raw_rows)
         while vi < nv:
             motion_vals.append(raw_rows[vi].motion_raw)
             edge_vals.append(raw_rows[vi].edge_raw)
+            text_vals.append(raw_rows[vi].text_like_raw)
             pal_vals.append(raw_rows[vi].palette_vs_ema_raw)
             vi += 1
         motion_norm = _normalize_robust(motion_vals)
         edge_norm = _normalize_robust(edge_vals)
+        text_norm = _normalize_robust(text_vals)
         palette_norm = _normalize_robust(pal_vals)
 
         windows: list[VisualWindow] = []
@@ -361,9 +397,10 @@ def analyze_visual(
             rw = raw_rows[wi]
             m = motion_norm[wi] if wi < len(motion_norm) else 0.0
             e = edge_norm[wi] if wi < len(edge_norm) else 0.0
+            txt = text_norm[wi] if wi < len(text_norm) else 0.0
             p = palette_norm[wi] if wi < len(palette_norm) else 0.0
-            hyp, conf = _hypothesis_from_features(m, e, p)
-            high_text = e > 0.55 and m < 0.45
+            hyp, conf = _hypothesis_from_features(m, e, p, txt)
+            high_text = (txt > 0.50 and e > 0.32) or (e > 0.62 and m < 0.42)
             windows.append(
                 VisualWindow(
                     t0=float(rw.t0),

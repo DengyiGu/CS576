@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from schemas.modality import SpeechSpan
 
@@ -79,9 +84,10 @@ def build_speech_spans(
     *,
     model_name: str = DEFAULT_WHISPER_MODEL,
     model_dir: Path | None = None,
+    device: str = CPU_DEVICE,
     compute_type: str = CPU_COMPUTE_TYPE,
     language: str | None = "en",
-    vad: bool = False,
+    vad: bool = True,
 ) -> list[SpeechSpan]:
     try:
         from faster_whisper import WhisperModel
@@ -92,7 +98,7 @@ def build_speech_spans(
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
     local_model_dir = ensure_whisper_model(model_name, model_dir)
-    model = WhisperModel(str(local_model_dir), device=CPU_DEVICE, compute_type=compute_type)
+    model = WhisperModel(str(local_model_dir), device=device, compute_type=compute_type)
     whisper_segments, _ = model.transcribe(
         str(video_path),
         language=language,
@@ -136,9 +142,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional custom local faster-whisper model directory",
     )
-    parser.add_argument("--compute-type", default=CPU_COMPUTE_TYPE, help="Whisper CPU compute type")
+    parser.add_argument("--device", default=CPU_DEVICE, choices=("cpu", "cuda"), help="Whisper inference device")
+    parser.add_argument("--compute-type", default=CPU_COMPUTE_TYPE, help="Whisper compute type, such as int8, int8_float16, float16, or float32")
     parser.add_argument("--language", default="en", help="Language code, such as en or zh")
-    parser.add_argument("--vad", action="store_true", help="Enable voice activity detection to skip non-speech sections")
+    parser.add_argument(
+        "--vad",
+        action="store_true",
+        default=True,
+        help="Enable voice activity detection to skip non-speech sections (default on)",
+    )
+    parser.add_argument(
+        "--no-vad",
+        action="store_false",
+        dest="vad",
+        help="Disable voice activity detection",
+    )
     return parser
 
 
@@ -159,6 +177,7 @@ def main() -> int:
         Path(args.video),
         model_name=args.model,
         model_dir=Path(args.whisper_model_dir) if args.whisper_model_dir else None,
+        device=args.device,
         compute_type=args.compute_type,
         language=args.language,
         vad=args.vad,
