@@ -6,6 +6,7 @@ from schemas.modality import AnalysisBundle, AudioWindow, SpeechSpan, VisualTrac
 from fusion.fuse import (
     _compute_spectral_flatness_baseline,
     _compute_transcript_density_baseline,
+    _compute_yamnet_baselines,
     _count_brand_hits,
     _count_lexicon_hits,
     _has_sponsorship_phrase,
@@ -13,6 +14,8 @@ from fusion.fuse import (
     _speech_text_ad_signal,
     _spectral_flatness_score,
     _transcript_density_score,
+    _yamnet_music_score,
+    _yamnet_nonspeech_score,
     fuse_bundle_to_segments,
 )
 
@@ -347,3 +350,71 @@ def test_spectral_flatness_score_returns_zero_on_missing_inputs() -> None:
     assert _spectral_flatness_score(None, 0.30) == 0.0
     assert _spectral_flatness_score(0.30, None) == 0.0
     assert _spectral_flatness_score(None, None) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# YAMNet helpers
+# ---------------------------------------------------------------------------
+
+def _yamnet_track(
+    music_values: list[float] | None = None,
+    speech_values: list[float] | None = None,
+) -> list[AudioWindow]:
+    n = len(music_values or speech_values or [])
+    out: list[AudioWindow] = []
+    for i in range(n):
+        kwargs: dict[str, float] = {}
+        if music_values is not None:
+            kwargs["yamnet_music_score"] = float(music_values[i])
+        if speech_values is not None:
+            kwargs["yamnet_speech_score"] = float(speech_values[i])
+        out.append(AudioWindow(t0=float(i), t1=float(i + 1), **kwargs))
+    return out
+
+
+def test_yamnet_baselines_use_per_video_medians() -> None:
+    audio = _yamnet_track(
+        music_values=[0.0, 0.1, 0.2, 0.3, 0.4],
+        speech_values=[0.9, 0.8, 0.7, 0.6, 0.5],
+    )
+    music_med, speech_med = _compute_yamnet_baselines(audio)
+    assert music_med == 0.2
+    assert speech_med == 0.7
+
+
+def test_yamnet_baselines_return_none_when_features_missing() -> None:
+    audio = [AudioWindow(t0=0.0, t1=1.0)]
+    assert _compute_yamnet_baselines(audio) == (None, None)
+
+
+def test_yamnet_music_score_zero_at_or_below_baseline() -> None:
+    assert _yamnet_music_score(0.30, 0.30) == 0.0
+    assert _yamnet_music_score(0.20, 0.30) == 0.0
+
+
+def test_yamnet_music_score_caps_at_one_for_large_excess() -> None:
+    # delta = 0.50 with default scale 0.20 -> raw 2.5, clipped to 1.0.
+    assert _yamnet_music_score(0.85, 0.35) == 1.0
+
+
+def test_yamnet_music_score_scales_linearly_below_cap() -> None:
+    # delta = 0.10, scale = 0.20 -> 0.5
+    assert _yamnet_music_score(0.40, 0.30) == pytest.approx(0.5)
+
+
+def test_yamnet_nonspeech_score_fires_when_speech_below_baseline() -> None:
+    # speech below baseline -> ad-like silence/music. delta = 0.30 - 0.10 = 0.20.
+    # scale = 0.30 -> raw 0.667, clipped.
+    assert _yamnet_nonspeech_score(0.10, 0.30) == pytest.approx(0.20 / 0.30)
+
+
+def test_yamnet_nonspeech_score_zero_when_speech_at_or_above_baseline() -> None:
+    assert _yamnet_nonspeech_score(0.30, 0.30) == 0.0
+    assert _yamnet_nonspeech_score(0.40, 0.30) == 0.0
+
+
+def test_yamnet_helpers_return_zero_on_missing_inputs() -> None:
+    assert _yamnet_music_score(None, 0.30) == 0.0
+    assert _yamnet_music_score(0.30, None) == 0.0
+    assert _yamnet_nonspeech_score(None, 0.30) == 0.0
+    assert _yamnet_nonspeech_score(0.30, None) == 0.0

@@ -400,6 +400,37 @@ def build_audio_windows(
     return audio_windows
 
 
+def _attach_yamnet_scores(
+    audio_windows: list[AudioWindow], samples_16k: np.ndarray
+) -> None:
+    """Run YAMNet on the same waveform and stamp per-window scores onto each
+    ``AudioWindow``'s extras. Quietly falls back to a no-op when the model
+    file is missing — keeps unit tests and minimal-dep installs working.
+    """
+    try:
+        from audio.yamnet_features import (
+            ALL_YAMNET_KEYS,
+            compute_yamnet_per_window,
+            default_model_path,
+        )
+    except ImportError:
+        return
+    model_path = default_model_path()
+    if not model_path.is_file():
+        return
+    bounds = [(float(w.t0), float(w.t1)) for w in audio_windows]
+    yamnet_scores = compute_yamnet_per_window(
+        samples_16k, audio_window_bounds=bounds, model_path=model_path
+    )
+    for idx, window in enumerate(audio_windows):
+        extra = window.model_extra
+        if extra is None:
+            extra = {}
+            window.__pydantic_extra__ = extra  # type: ignore[attr-defined]
+        for key in ALL_YAMNET_KEYS:
+            extra[key] = float(yamnet_scores[key][idx])
+
+
 def analyze_audio(
     video_path: Path | str | None = None,
     *,
@@ -407,6 +438,7 @@ def analyze_audio(
     sample_rate: int = _DEFAULT_SAMPLE_RATE,
     keep_wav: Path | None = None,
     audio_in: Path | str | None = None,
+    compute_yamnet: bool = True,
 ) -> tuple[list[AudioWindow], float]:
     """Return per-window features and duration for a video or pre-extracted WAV.
 
@@ -414,6 +446,13 @@ def analyze_audio(
     ffmpeg entirely and reads a mono PCM WAV directly, matching the planning
     doc's pipeline step 1 ("Frames + audio file") so step 2 can be re-run
     without re-demuxing.
+
+    When ``compute_yamnet`` is true and the YAMNet ONNX model is available
+    on disk (``audio/models/yamnet.onnx``), each returned ``AudioWindow``
+    is also stamped with ``yamnet_*_score`` extras consumed by the
+    fusion layer. Missing model file is a silent skip — the rest of the
+    pipeline degrades gracefully because ``fusion/fuse.py`` treats
+    absent YAMNet fields as zero contribution.
     """
     if (video_path is None) == (audio_in is None):
         raise ValueError("Provide exactly one of video_path or audio_in.")
@@ -441,6 +480,8 @@ def analyze_audio(
 
     duration_sec = float(samples.size) / float(sr) if sr > 0 else 0.0
     audio_windows = build_audio_windows(samples, sr, window_sec=window_sec)
+    if compute_yamnet and sr == 16_000 and audio_windows:
+        _attach_yamnet_scores(audio_windows, samples)
     return audio_windows, duration_sec
 
 

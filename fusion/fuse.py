@@ -112,12 +112,25 @@ FIRST_AD_MIN_START_SEC = 30.0
 
 # Score component weights for the "foreignness" interior bonus
 W_PALETTE  = 0.00
-W_AUDIO    = 0.40
+W_AUDIO    = 0.30
 W_NOSPEECH = 0.00
-W_VISUAL_SEMANTIC = 0.35
-W_DENSITY_DROP    = 0.20   # transcript density drop vs. global baseline
-W_SPECTRAL_FLATNESS = 0.20 # spectral flatness deviation from per-video median
-W_RANDOM   = 0.00          # random baseline parameter for testing
+W_VISUAL_SEMANTIC = 0.30
+W_DENSITY_DROP    = 0.20    # transcript density drop vs. global baseline
+W_SPECTRAL_FLATNESS = 0.15  # spectral flatness deviation from per-video median
+W_YAMNET_MUSIC      = 0.40  # YAMNet "Music / Background music / Theme music /
+                            # Jingle / Soundtrack" max-pool of probabilities.
+                            # The strongest single inside-vs-outside-ad signal
+                            # we have on real broadcast TV: gap +0.14..+0.75
+                            # on 5 of 6 cached videos vs the MFCC-based
+                            # anomaly_score's near-zero gap. Per-video
+                            # baseline-subtracted (see _yamnet_music_score)
+                            # so videos with continuous show-underscore
+                            # don't false-trigger.
+W_YAMNET_NONSPEECH  = 0.20  # (median_speech_score - speech_at_window): a
+                            # the rare ad with content-typical music but no
+                            # dialog (e.g. wordless montages); also helps
+                            # de-rank dialog-heavy show segments.
+W_RANDOM   = 0.00           # random baseline parameter for testing
 
 # Spectral flatness scale: a (flatness - per_video_median) of this size maps
 # to score 1.0. Picked from the diagnostic — the inside-ad excess flatness
@@ -305,6 +318,105 @@ def _spectral_flatness_score(
     if flatness is None or baseline is None:
         return 0.0
     delta = flatness - baseline
+    return float(max(0.0, min(1.0, delta / scale)))
+
+
+def _yamnet_features(
+    t0: float, t1: float, audio_windows: list[AudioWindow]
+) -> tuple[float | None, float | None]:
+    """Return (yamnet_music_score, yamnet_speech_score) for the audio
+    window closest to ``[t0, t1]`` — both ``None`` when the bundle was
+    produced before YAMNet was integrated (legacy bundle support).
+    """
+    mid = 0.5 * (t0 + t1)
+    best_dist = float("inf")
+    music: float | None = None
+    speech: float | None = None
+    for aw in audio_windows:
+        d = abs(0.5 * (aw.t0 + aw.t1) - mid)
+        if d < best_dist:
+            best_dist = d
+            extra = aw.model_extra or {}
+            mv = extra.get("yamnet_music_score")
+            sv = extra.get("yamnet_speech_score")
+            music  = float(mv) if mv is not None else None
+            speech = float(sv) if sv is not None else None
+    return music, speech
+
+
+# YAMNet score scales: a deviation of this size from the per-video
+# median maps to 1.0. Sized from the diagnostic — the inside-vs-outside-ad
+# gap on the cached videos is ~0.14 (test_010, music-heavy show) up to
+# ~0.75 (test_001, dialog-only show). Scale 0.20 puts the strongest
+# discriminators near the cap and the weakest still meaningful.
+_YAMNET_MUSIC_SCALE = 0.20
+_YAMNET_NONSPEECH_SCALE = 0.30
+
+
+def _compute_yamnet_baselines(
+    audio_windows: list[AudioWindow],
+) -> tuple[float | None, float | None]:
+    """Return (music_median, speech_median) across the whole video.
+
+    Used as content-baselines for the per-window deviation scores, on the
+    same logic as ``_compute_spectral_flatness_baseline``: content
+    typically dominates duration so median ≈ "content level"; positive
+    deviation signals an ad. Either component is ``None`` when the
+    feature is missing on every audio window (legacy bundle).
+    """
+    music_values: list[float] = []
+    speech_values: list[float] = []
+    for aw in audio_windows:
+        extra = aw.model_extra or {}
+        mv = extra.get("yamnet_music_score")
+        sv = extra.get("yamnet_speech_score")
+        if mv is not None:
+            music_values.append(float(mv))
+        if sv is not None:
+            speech_values.append(float(sv))
+    music_baseline = float(np.median(music_values)) if music_values else None
+    speech_baseline = float(np.median(speech_values)) if speech_values else None
+    return music_baseline, speech_baseline
+
+
+def _yamnet_music_score(
+    music: float | None,
+    baseline: float | None,
+    *,
+    scale: float = _YAMNET_MUSIC_SCALE,
+) -> float:
+    """Score how much YAMNet's music probability exceeds the per-video median.
+
+    Returns ``0.0`` when either value is missing or the window is at/below
+    the baseline. Why baseline-subtract: videos with heavy show
+    underscore (e.g. film/TV drama) sit at music ≈ 0.30-0.50 throughout,
+    so absolute music probability mis-fires; the deviation captures the
+    *additional* music boost that ad blocks impose on top of the show.
+    """
+    if music is None or baseline is None:
+        return 0.0
+    delta = music - baseline
+    return float(max(0.0, min(1.0, delta / scale)))
+
+
+def _yamnet_nonspeech_score(
+    speech: float | None,
+    speech_baseline: float | None,
+    *,
+    scale: float = _YAMNET_NONSPEECH_SCALE,
+) -> float:
+    """Score how much YAMNet's speech probability *fell below* the per-video median.
+
+    Equivalent to the music helper applied to ``(1 - speech) - (1 - median)
+    = median - speech`` — i.e. windows that are *less* speech-heavy than
+    the video's typical content. Useful as an inverse cue for wordless
+    ad montages on dialog-dense shows; on already-quiet shows
+    (test_010-style) this signal is weak and clipping at 0 prevents it
+    from firing on benign quiet stretches.
+    """
+    if speech is None or speech_baseline is None:
+        return 0.0
+    delta = speech_baseline - speech
     return float(max(0.0, min(1.0, delta / scale)))
 
 
@@ -537,6 +649,7 @@ def _compute_foreignness_scores(
     scores = np.zeros(N, dtype=np.float64)
     density_baseline = _compute_transcript_density_baseline(speech_spans, duration)
     flatness_baseline = _compute_spectral_flatness_baseline(audio_windows)
+    yamnet_music_baseline, yamnet_speech_baseline = _compute_yamnet_baselines(audio_windows)
 
     for i, w in enumerate(windows):
         t0, t1 = w.t0, w.t1
@@ -550,6 +663,12 @@ def _compute_foreignness_scores(
         if energy < 0.015:
             audio_score = max(audio_score, 0.8)
         spectral_score = _spectral_flatness_score(flatness, flatness_baseline)
+
+        yamnet_music, yamnet_speech = _yamnet_features(t0, t1, audio_windows)
+        yamnet_music_score = _yamnet_music_score(yamnet_music, yamnet_music_baseline)
+        yamnet_nonspeech_score = _yamnet_nonspeech_score(
+            yamnet_speech, yamnet_speech_baseline
+        )
 
         cov    = _speech_coverage(t0, t1, speech_spans)
         nearby = _has_nearby_speech(t0, t1, speech_spans, SPEECH_CONTEXT_SEC)
@@ -570,12 +689,14 @@ def _compute_foreignness_scores(
 
         # Suppress very start/end of video
         if mid < FIRST_AD_MIN_START_SEC or mid > duration - 20.0:
-            palette_score   *= 0.1
-            visual_semantic *= 0.1
-            audio_score     *= 0.1
-            nospeech_score  *= 0.1
-            density_drop    *= 0.1
-            spectral_score  *= 0.1
+            palette_score          *= 0.1
+            visual_semantic        *= 0.1
+            audio_score            *= 0.1
+            nospeech_score         *= 0.1
+            density_drop           *= 0.1
+            spectral_score         *= 0.1
+            yamnet_music_score     *= 0.1
+            yamnet_nonspeech_score *= 0.1
 
         scores[i] = (
             W_PALETTE  * palette_score
@@ -584,6 +705,8 @@ def _compute_foreignness_scores(
             + W_NOSPEECH * nospeech_score
             + W_DENSITY_DROP * density_drop
             + W_SPECTRAL_FLATNESS * spectral_score
+            + W_YAMNET_MUSIC * yamnet_music_score
+            + W_YAMNET_NONSPEECH * yamnet_nonspeech_score
             + W_RANDOM * np.random.rand()
         )
 

@@ -231,5 +231,8 @@ __marimo__/
 # Local ASR models are downloaded during setup and should not be committed
 /Automatic_speech_recognition/models/
 
+# Local audio classification models (YAMNet ONNX) — downloaded during setup
+/audio/models/
+
 # Local working notes (kept private to each contributor)
 SESSION_NOTES.md

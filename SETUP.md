@@ -31,6 +31,34 @@ python Automatic_speech_recognition/segment_text_analyzer.py --download-model --
 
 Other sizes: `tiny`, `base`, `small` (default), `medium`, `large-v3`.
 
+## 3b. Download the YAMNet audio-event model (one-time, ~16 MB)
+
+Fusion uses YAMNet's per-window music / speech probabilities as one of
+its strongest ad-interior cues. Pull the ONNX export from Hugging Face
+into `audio/models/`:
+
+```powershell
+python -c "from huggingface_hub import hf_hub_download; import shutil, os
+os.makedirs('audio/models', exist_ok=True)
+for fn in ('yamnet.onnx', 'yamnet_class_map.csv'):
+    src = hf_hub_download(repo_id='zeropointnine/yamnet-onnx', filename=fn)
+    shutil.copyfile(src, os.path.join('audio/models', fn))"
+```
+
+After running steps 4–5 once, you can fold YAMNet scores into existing
+analysis bundles without re-running the full pipeline:
+
+```powershell
+$env:PYTHONPATH = "."
+python scripts/add_yamnet_to_bundles.py
+# or just one video
+python scripts/add_yamnet_to_bundles.py --tests test_001
+```
+
+The script re-extracts audio via ffmpeg, runs YAMNet (~2 s of CPU time
+per 30-min video), and writes `yamnet_*` fields back into each
+`AudioWindow` of the cached bundle.
+
 ## 4. Drop a video in
 
 Place a `.mp4` (or any container ffmpeg can decode) under
