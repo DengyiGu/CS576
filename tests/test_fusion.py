@@ -111,6 +111,66 @@ def test_fusion_uses_visual_semantics_when_palette_delta_is_subtle() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Configurable ad count (num_ads parameter / auto-K)
+# ---------------------------------------------------------------------------
+
+def test_fusion_recovers_four_ads_when_num_ads_is_4() -> None:
+    """The DP must scale to K=4 ads when explicitly requested."""
+    reference_ads = [
+        (50.0, 110.0), (180.0, 240.0), (320.0, 380.0), (460.0, 520.0),
+    ]
+    bundle = _synthetic_bundle_with_ads(reference_ads, duration=600.0)
+
+    segments = fuse_bundle_to_segments(bundle, num_ads=4)
+
+    predicted_ads = [s for s in segments if s["label"] == "Advertisement"]
+    assert len(predicted_ads) == 4
+    for pred, ref in zip(predicted_ads, reference_ads):
+        overlap = max(0.0, min(pred["end"], ref[1]) - max(pred["start"], ref[0]))
+        ref_duration = ref[1] - ref[0]
+        assert overlap / ref_duration >= 0.80
+
+
+def test_fusion_recovers_one_ad_when_num_ads_is_1() -> None:
+    """Forcing K=1 must return exactly one ad covering the strongest interval."""
+    reference_ads = [(80.0, 160.0)]
+    bundle = _synthetic_bundle_with_ads(reference_ads, duration=300.0)
+
+    segments = fuse_bundle_to_segments(bundle, num_ads=1)
+
+    predicted_ads = [s for s in segments if s["label"] == "Advertisement"]
+    assert len(predicted_ads) == 1
+    pred = predicted_ads[0]
+    ref = reference_ads[0]
+    overlap = max(0.0, min(pred["end"], ref[1]) - max(pred["start"], ref[0]))
+    assert overlap / (ref[1] - ref[0]) >= 0.80
+
+
+def test_fusion_auto_k_picks_four_on_four_ad_bundle() -> None:
+    """num_ads=None (auto) should land on K=4 when there are 4 strong ads."""
+    reference_ads = [
+        (50.0, 110.0), (180.0, 240.0), (320.0, 380.0), (460.0, 520.0),
+    ]
+    bundle = _synthetic_bundle_with_ads(reference_ads, duration=600.0)
+
+    segments = fuse_bundle_to_segments(bundle, num_ads=None, max_num_ads=6)
+
+    predicted_ads = [s for s in segments if s["label"] == "Advertisement"]
+    assert len(predicted_ads) == 4
+
+
+def test_fusion_auto_k_stays_at_three_on_three_ad_bundle() -> None:
+    """Auto-K should not over-detect: a 3-ad bundle stays at K=3."""
+    reference_ads = [(50.0, 110.0), (180.0, 210.0), (290.0, 330.0)]
+    bundle = _synthetic_bundle_with_ads(reference_ads, duration=420.0)
+
+    segments = fuse_bundle_to_segments(bundle, num_ads=None, max_num_ads=6)
+
+    predicted_ads = [s for s in segments if s["label"] == "Advertisement"]
+    assert len(predicted_ads) == 3
+
+
+# ---------------------------------------------------------------------------
 # Brand matching with word boundaries
 # ---------------------------------------------------------------------------
 

@@ -26,6 +26,20 @@ from pathlib import Path
 from fusion.fuse import fuse_bundle_to_segments, load_bundle, write_segments_json
 
 
+def _parse_num_ads(value: str | None) -> int | None:
+    """Map the --num-ads CLI argument to fuse_bundle_to_segments' input.
+
+    "auto" / "0" / "" -> None  (let the DP pick K via marginal-gain).
+    Any positive integer is forwarded as-is.
+    """
+    if value is None:
+        return None
+    v = str(value).strip().lower()
+    if v in ("", "auto", "0", "none"):
+        return None
+    return int(v)
+
+
 def _run_visual_and_fuse(
     video: Path,
     *,
@@ -34,6 +48,8 @@ def _run_visual_and_fuse(
     sample_fps: float,
     window_sec: float,
     min_segment_seconds: float,
+    num_ads: int | None,
+    max_num_ads: int,
     skip_speech: bool = False,
 ) -> int:
     """
@@ -88,7 +104,12 @@ def _run_visual_and_fuse(
     print(f"[fusion] Active modalities: {', '.join(modalities_active)}")
     print(f"[fusion] Fusing {len(bundle.visual.windows)} windows ...")
 
-    segments = fuse_bundle_to_segments(bundle, min_segment_seconds=min_segment_seconds)
+    segments = fuse_bundle_to_segments(
+        bundle,
+        min_segment_seconds=min_segment_seconds,
+        num_ads=num_ads,
+        max_num_ads=max_num_ads,
+    )
     write_segments_json(segments, out)
     _print_summary(segments, out)
     return 0
@@ -173,8 +194,27 @@ def main(argv: list[str] | None = None) -> int:
         default=4.0,
         help="Segments shorter than this get absorbed by neighbors (default 4.0, recommend 20.0).",
     )
+    parser.add_argument(
+        "--num-ads",
+        type=str,
+        default="auto",
+        metavar="K",
+        help=(
+            "How many ads the DP should find. Positive integer K forces exactly K. "
+            "'auto' (or 0) lets the DP choose K in [min, --max-num-ads] using a "
+            "marginal-gain rule. Default: auto."
+        ),
+    )
+    parser.add_argument(
+        "--max-num-ads",
+        type=int,
+        default=6,
+        metavar="K",
+        help="Upper bound on K when --num-ads=auto (default 6).",
+    )
 
     args = parser.parse_args(argv)
+    num_ads = _parse_num_ads(args.num_ads)
 
     # End-to-end mode: video -> visual analysis -> speech -> fuse
     if args.video is not None:
@@ -190,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
             sample_fps=args.sample_fps,
             window_sec=args.window_sec,
             min_segment_seconds=args.min_segment_sec,
+            num_ads=num_ads,
+            max_num_ads=args.max_num_ads,
             skip_speech=args.skip_speech,
         )
 
@@ -249,7 +291,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[fusion] Active modalities: {', '.join(modalities_active)}")
     print(f"[fusion] Fusing {len(bundle.visual.windows)} windows ...")
 
-    segments = fuse_bundle_to_segments(bundle, min_segment_seconds=args.min_segment_sec)
+    segments = fuse_bundle_to_segments(
+        bundle,
+        min_segment_seconds=args.min_segment_sec,
+        num_ads=num_ads,
+        max_num_ads=args.max_num_ads,
+    )
     write_segments_json(segments, out)
     _print_summary(segments, out)
     return 0
