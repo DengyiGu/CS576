@@ -21,7 +21,6 @@ _KIND_FOR_LABEL: dict[str, str] = {
 }
 
 # Hyper-parameters
-ALLOWED_AD_COUNTS = (3, 4)
 AD_MIN_SEC = 20.0
 AD_MAX_SEC = 130.0
 GAP_MIN_SEC = 60.0
@@ -508,6 +507,8 @@ def _build_segments_from_ad_intervals(
     ad_intervals: list[tuple[int, int]],
     windows: list[VisualWindow],
     duration: float,
+    intro_end_sec: float | None = None,
+    outro_start_sec: float | None = None,
 ) -> list[dict[str, Any]]:
     N = len(windows)
     is_ad = [False] * N
@@ -517,8 +518,6 @@ def _build_segments_from_ad_intervals(
     first_ad_start = ad_intervals[0][0]
     last_ad_end = ad_intervals[-1][1]
     segments: list[dict[str, Any]] = []
-    intro_used = False
-    outro_used = False
     i = 0
     while i < N:
         if is_ad[i]:
@@ -532,25 +531,27 @@ def _build_segments_from_ad_intervals(
             ))
             i = j
         else:
-            run_indices: list[int] = []
             j = i
             while j < N and not is_ad[j]:
-                run_indices.append(j)
                 j += 1
-            is_before = run_indices[-1] < first_ad_start
-            is_after = run_indices[0] >= last_ad_end
-            label, intro_used, outro_used = _label_content_run(
-                windows, run_indices,
-                is_before_first_ad=is_before,
-                is_after_last_ad=is_after,
-                intro_used=intro_used,
-                outro_used=outro_used,
-            )
-            segments.append(_make_segment_dict(
-                label,
-                windows[i].t0,
-                windows[j - 1].t1,
-            ))
+            run_start = windows[i].t0
+            run_end = windows[j - 1].t1
+            is_before = (j - 1) < first_ad_start
+            is_after = i >= last_ad_end
+            if is_before and intro_end_sec is not None:
+                cut = min(intro_end_sec, run_end)
+                if cut > run_start:
+                    segments.append(_make_segment_dict(LABEL_INTRO, run_start, cut))
+                if cut < run_end:
+                    segments.append(_make_segment_dict(LABEL_CORE_CONTENT, cut, run_end))
+            elif is_after and outro_start_sec is not None:
+                cut = max(outro_start_sec, run_start)
+                if cut > run_start:
+                    segments.append(_make_segment_dict(LABEL_CORE_CONTENT, run_start, cut))
+                if cut < run_end:
+                    segments.append(_make_segment_dict(LABEL_OUTRO, cut, run_end))
+            else:
+                segments.append(_make_segment_dict(LABEL_CORE_CONTENT, run_start, run_end))
             i = j
     segments.sort(key=lambda s: s["start"])
     return segments
@@ -599,6 +600,8 @@ def fuse_bundle_to_segments(
     *,
     min_segment_seconds: float = 12.0,
     enforce_three_ads: bool = True,
+    intro_end_sec: float | None = None,
+    outro_start_sec: float | None = None,
 ) -> list[dict[str, Any]]:
     if bundle.visual is None or not bundle.visual.windows:
         return []
@@ -617,7 +620,7 @@ def fuse_bundle_to_segments(
 
     ad_intervals = _find_best_three_ads(smooth_edge, smooth_foreign, windows)
 
-    if ad_intervals and len(ad_intervals) in ALLOWED_AD_COUNTS:
+    if ad_intervals:
         refined: list[tuple[int, int]] = []
         for s, e in ad_intervals:
             rs = _refine_boundary(s, smooth_edge, "start", windows, search_sec=12.0)
@@ -627,7 +630,11 @@ def fuse_bundle_to_segments(
             if re - rs < min_w:
                 re = min(len(windows), rs + min_w)
             refined.append((rs, re))
-        return _build_segments_from_ad_intervals(refined, windows, duration)
+        return _build_segments_from_ad_intervals(
+            refined, windows, duration,
+            intro_end_sec=intro_end_sec,
+            outro_start_sec=outro_start_sec,
+        )
 
     return [_make_segment_dict(LABEL_CORE_CONTENT, windows[0].t0, windows[-1].t1)]
 
