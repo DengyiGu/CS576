@@ -30,18 +30,14 @@ def _speech_coverage(t0: float, t1: float, speech_spans: list[SpeechSpan]) -> fl
 def score_window(w: VisualWindow, audio_windows: list[AudioWindow], speech_spans: list[SpeechSpan], duration: float) -> float:
     t_mid = 0.5 * (w.t0 + w.t1)
     
-    # VISUAL
+    # VISUAL - stricter
     palette = float(w.palette_delta)
     graphics = 1.0 if w.visual_hypothesis == "graphics_heavy" else 0.0
     text_dense = 1.0 if getattr(w, 'high_text_density', False) else 0.0
-    edge = float(getattr(w, 'edge_density', 0.0))
-    motion_low = 1.0 if float(w.motion_score) < 0.35 else 0.0
-    shot_near = 1.0 if getattr(w, 'shot_boundary_near', False) else 0.0
 
-    visual_score = (0.45 * palette + 0.22 * graphics + 0.15 * text_dense + 
-                   0.08 * edge + 0.05 * motion_low + 0.05 * shot_near)
+    visual_score = 0.50 * palette + 0.25 * graphics + 0.15 * text_dense
 
-    # AUDIO - this is key for inserted ads
+    # AUDIO - strongest signal
     anomaly = 0.0
     energy = 1.0
     audio_label = "unknown"
@@ -54,19 +50,19 @@ def score_window(w: VisualWindow, audio_windows: list[AudioWindow], speech_spans
 
     audio_score = anomaly
     if audio_label in {"music", "mixed"}:
-        audio_score = max(audio_score, 0.78)
+        audio_score = max(audio_score, 0.85)
     if energy < 0.15:
-        audio_score = max(audio_score, 0.50)
+        audio_score = max(audio_score, 0.45)
 
     # SPEECH
     speech_cov = _speech_coverage(w.t0, w.t1, speech_spans)
-    speech_score = 0.75 if speech_cov < 0.40 else (0.30 if speech_cov < 0.60 else 0.0)
+    speech_score = 0.85 if speech_cov < 0.35 else 0.0
 
-    total_score = (0.40 * visual_score + 0.48 * audio_score + 0.12 * speech_score)
+    total_score = (0.32 * visual_score + 0.55 * audio_score + 0.13 * speech_score)
 
-    # Edge suppression
-    if t_mid < 50 or t_mid > duration - 50:
-        total_score *= 0.35
+    # Strong edge suppression
+    if t_mid < 60 or t_mid > duration - 60:
+        total_score *= 0.25
 
     return float(np.clip(total_score, 0.0, 1.0))
 
@@ -90,14 +86,14 @@ def _post_process(segments: list[dict], duration: float) -> list[dict]:
         dur = seg["end"] - seg["start"]
         start, end = seg["start"], seg["end"]
 
-        # Intro - only first possible segment
-        if not intro_done and start < 150 and dur < 160 and i <= 2:
+        # Intro - very beginning only
+        if not intro_done and start < 160 and dur < 170 and i <= 3:
             final.append({"start": round(start, 3), "end": round(end, 3), "label": LABEL_INTRO, "kind": "non-content"})
             intro_done = True
             continue
 
-        # Outro - only last possible segment
-        if not outro_done and end > duration - 120 and dur < 220 and i >= len(merged)-3:
+        # Outro - very end only
+        if not outro_done and end > duration - 130 and dur < 230 and i >= len(merged)-4:
             final.append({"start": round(start, 3), "end": round(end, 3), "label": LABEL_OUTRO, "kind": "non-content"})
             outro_done = True
             continue
@@ -118,7 +114,7 @@ def fuse_bundle_to_segments(bundle: AnalysisBundle, min_segment_seconds: float =
 
     scores = np.array([score_window(w, audio_windows, speech_spans, duration) for w in windows])
 
-    is_ad = scores >= 0.52   # raised a bit to reduce false positives
+    is_ad = scores >= 0.57   # Higher threshold
 
     segments = []
     i = 0
@@ -131,7 +127,7 @@ def fuse_bundle_to_segments(bundle: AnalysisBundle, min_segment_seconds: float =
                 j += 1
             start = windows[i].t0
             end = windows[j-1].t1
-            if end - start >= 24.0:
+            if end - start >= 28.0:   # stricter minimum ad length
                 segments.append({
                     "start": round(start, 3),
                     "end": round(end, 3),
@@ -145,7 +141,7 @@ def fuse_bundle_to_segments(bundle: AnalysisBundle, min_segment_seconds: float =
                 j += 1
             start = windows[i].t0
             end = windows[j-1].t1
-            if end - start >= 12.0:
+            if end - start >= 15.0:
                 segments.append({
                     "start": round(start, 3),
                     "end": round(end, 3),
@@ -166,8 +162,7 @@ def write_segments_json(segments: list[dict[str, Any]], out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": "1.0",
-        "source": "simple_fusion_v6",
+        "source": "simple_fusion_v8",
         "segments": segments,
     }
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    
