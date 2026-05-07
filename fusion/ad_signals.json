@@ -18,7 +18,10 @@
       "tropicana", "minute maid", "simply orange", "naked juice",
       "yoplait", "chobani", "fage", "activia",
       "hellmann's", "hellmans", "kraft", "heinz", "kellogg's", "kelloggs",
-      "general mills", "quaker", "campbells", "campbell's"
+      "general mills", "quaker", "campbells", "campbell's",
+      "frank's red hot", "franks red hot", "frank's redhot", "franks redhot",
+      "tabasco", "sriracha", "lay's stax", "ritz crackers", "goldfish crackers",
+      "cheez-it", "cheez it", "wheat thins", "triscuit", "chex mix"
     ],
     "tech_electronics": [
       "apple", "iphone", "ipad", "macbook", "airpods",
@@ -116,7 +119,18 @@
       "peloton", "mirror", "tonal",
       "calm", "headspace", "noom", "weight watchers",
       "ancestry", "23andme",
-      "grammarly", "honey", "rakuten"
+      "grammarly", "honey", "rakuten",
+      "instacart", "doordash", "ubereats", "uber eats", "grubhub", "postmates"
+    ],
+    "home_household_tools": [
+      "bosch", "bosch appliances", "bosch power tools",
+      "dewalt", "makita", "ryobi", "milwaukee tool", "stanley tools", "craftsman tools",
+      "black and decker", "black & decker",
+      "tide", "tide pods", "gain detergent", "downy", "bounce dryer",
+      "lysol", "clorox", "windex", "swiffer", "mr clean", "mr. clean", "scrub daddy",
+      "kohler", "moen", "delta faucet",
+      "weber grills", "traeger", "yeti coolers",
+      "scotts lawn", "miracle gro", "miracle-gro"
     ]
   },
   "phrases": {
@@ -172,7 +186,7 @@
     ],
     "tv_ad_tagline": [
       "the official", "america's number one", "america's favorite",
-      "the original", "the only", "trusted by", "trusted for",
+      "the original", "trusted by", "trusted for",
       "voted best", "the leader in", "the new"
     ],
     "tv_ad_compliance": [
