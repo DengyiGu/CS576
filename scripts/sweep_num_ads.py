@@ -34,7 +34,7 @@ VIDEO_INFO_DIR = ROOT / "video_info"
 VARIANTS = [
     ("K3",   {"num_ads": 3}),
     ("K4",   {"num_ads": 4}),
-    ("auto", {"num_ads": None, "max_num_ads": 6}),
+    ("auto", {"num_ads": None}),  # use the module's MAX_NUM_ADS default
 ]
 
 TESTS = ["test_001", "test_002", "test_003", "test_004", "test_005", "test_010"]

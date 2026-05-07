@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import pytest
+
 from schemas.modality import AnalysisBundle, AudioWindow, SpeechSpan, VisualTrack, VisualWindow
 from fusion.fuse import (
+    _compute_spectral_flatness_baseline,
     _compute_transcript_density_baseline,
     _count_brand_hits,
     _count_lexicon_hits,
     _has_sponsorship_phrase,
     _loudness_jump_score,
     _speech_text_ad_signal,
+    _spectral_flatness_score,
     _transcript_density_score,
     fuse_bundle_to_segments,
 )
@@ -298,3 +302,48 @@ def test_loudness_jump_zero_when_no_data_around_boundary() -> None:
     # Boundary far past the audio — both sides empty.
     audio = _audio_steps(low_db=-30.0, high_db=-22.0, switch_sec=30.0, duration_sec=60.0)
     assert _loudness_jump_score(500.0, audio) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Spectral-flatness helpers
+# ---------------------------------------------------------------------------
+
+def _flatness_track(values: list[float]) -> list[AudioWindow]:
+    return [
+        AudioWindow(t0=float(i), t1=float(i + 1), spectral_flatness=float(v))
+        for i, v in enumerate(values)
+    ]
+
+
+def test_spectral_flatness_baseline_returns_per_video_median() -> None:
+    audio = _flatness_track([0.10, 0.20, 0.30, 0.40, 0.50])
+    assert _compute_spectral_flatness_baseline(audio) == 0.30
+
+
+def test_spectral_flatness_baseline_returns_none_when_feature_missing() -> None:
+    audio = [
+        AudioWindow(t0=0.0, t1=1.0),
+        AudioWindow(t0=1.0, t1=2.0, anomaly_score=0.5),
+    ]
+    assert _compute_spectral_flatness_baseline(audio) is None
+
+
+def test_spectral_flatness_score_zero_when_at_or_below_baseline() -> None:
+    assert _spectral_flatness_score(0.30, 0.30) == 0.0
+    assert _spectral_flatness_score(0.20, 0.30) == 0.0
+
+
+def test_spectral_flatness_score_caps_at_one_for_large_excess() -> None:
+    # delta = 0.30 with default scale 0.10 -> raw 3.0, clipped to 1.0.
+    assert _spectral_flatness_score(0.60, 0.30) == 1.0
+
+
+def test_spectral_flatness_score_scales_linearly_below_cap() -> None:
+    # delta = 0.05, scale = 0.10 -> 0.5 (allow float imprecision).
+    assert _spectral_flatness_score(0.35, 0.30) == pytest.approx(0.5)
+
+
+def test_spectral_flatness_score_returns_zero_on_missing_inputs() -> None:
+    assert _spectral_flatness_score(None, 0.30) == 0.0
+    assert _spectral_flatness_score(0.30, None) == 0.0
+    assert _spectral_flatness_score(None, None) == 0.0
