@@ -147,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Run visual + audio + speech + fusion end-to-end on a video.",
     )
     parser.add_argument("video", type=Path, nargs="?", help="Input video file (.mp4 / .mov / ...).")
-    parser.add_argument("--all-videos", action="store_true", help="Process all videos in videos_with_ad/ directory.")
+    parser.add_argument("--input-dir", type=Path, help="Process all videos in the specified directory.")
     parser.add_argument("--out-dir", type=Path, default=Path("data/output"))
     parser.add_argument("--skip-analysis", action="store_true")
     parser.add_argument(
@@ -171,8 +171,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # Determine which videos to process
-    if args.all_videos:
-        videos_dir = Path("videos_with_ad")
+    if args.input_dir:
+        videos_dir = args.input_dir.expanduser().resolve()
         if not videos_dir.is_dir():
             print(f"Error: videos directory not found: {videos_dir}", file=sys.stderr)
             return 2
@@ -189,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if args.video is None:
             parser.print_help()
-            print(f"\nError: either provide a video file or use --all-videos", file=sys.stderr)
+            print(f"\nError: either provide a video file or use --input-dir", file=sys.stderr)
             return 2
         video = args.video.expanduser().resolve(strict=False)
         if not video.is_file():
