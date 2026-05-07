@@ -228,15 +228,18 @@ def _smooth(scores: np.ndarray, half_win: int) -> np.ndarray:
         out[i] = scores[lo:hi].mean()
     return out
 
-# Step 3 – DP over edge pairs
-def _find_best_three_ads(
+
+# Generalized DP for any number of ads
+def _find_best_ads(
     edge_scores: np.ndarray,
     foreign_scores: np.ndarray,
     windows: list[VisualWindow],
+    max_ads: int = 6,
 ) -> list[tuple[int, int]]:
     N = len(windows)
     if N == 0:
         return []
+
     e_max = edge_scores.max()
     f_max = foreign_scores.max()
     norm_edge = edge_scores / (e_max + 1e-9)
@@ -262,9 +265,12 @@ def _find_best_three_ads(
 
     NEG_INF = float("-inf")
 
-    # Best single ad
-    b1s = np.full(N + 1, NEG_INF, dtype=np.float64)
-    b1st = np.full(N + 1, -1, dtype=np.int32)
+    # DP tables: best score ending at position i with exactly k ads
+    dp = np.full((N + 1, max_ads + 1), NEG_INF, dtype=np.float64)
+    prev = np.full((N + 1, max_ads + 1, 2), -1, dtype=np.int32)  # (start, prev_end)
+
+    dp[0, 0] = 0.0
+
     for e in range(min_w, N + 1):
         s_lo = max(first_start_idx, e - max_w)
         s_hi = e - min_w
@@ -280,179 +286,51 @@ def _find_best_three_ads(
             if dur > AD_MAX_SEC:
                 break
             sc = interval_score(s, e)
-            if sc > b1s[e]:
-                b1s[e] = sc
-                b1st[e] = s
 
-    p1s = np.full(N + 1, NEG_INF, dtype=np.float64)
-    p1e = np.full(N + 1, -1, dtype=np.int32)
-    p1st = np.full(N + 1, -1, dtype=np.int32)
-    for i in range(N + 1):
-        if i > 0:
-            p1s[i] = p1s[i - 1]
-            p1e[i] = p1e[i - 1]
-            p1st[i] = p1st[i - 1]
-        if b1s[i] > p1s[i]:
-            p1s[i] = b1s[i]
-            p1e[i] = i
-            p1st[i] = b1st[i]
+            # 1 ad case
+            if sc > dp[e, 1]:
+                dp[e, 1] = sc
+                prev[e, 1] = [s, -1]
 
-    # Best pair
-    b2s = np.full(N + 1, NEG_INF, dtype=np.float64)
-    b2s2 = np.full(N + 1, -1, dtype=np.int32)
-    b2e1 = np.full(N + 1, -1, dtype=np.int32)
-    b2s1 = np.full(N + 1, -1, dtype=np.int32)
-    for e2 in range(min_w, N + 1):
-        s2_lo = max(first_start_idx, e2 - max_w)
-        s2_hi = e2 - min_w
-        if s2_lo > s2_hi:
-            continue
-        t_e2 = windows[e2 - 1].t1
-        for s2 in range(s2_hi, s2_lo - 1, -1):
-            if windows[s2].t0 < FIRST_AD_MIN_START_SEC:
-                break
-            dur = t_e2 - windows[s2].t0
-            if dur < AD_MIN_SEC:
-                continue
-            if dur > AD_MAX_SEC:
-                break
-            sc2 = interval_score(s2, e2)
-            me1 = s2 - gap_w
-            if me1 < 0 or p1s[me1] <= NEG_INF:
-                continue
-            total = p1s[me1] + sc2
-            if total > b2s[e2]:
-                b2s[e2] = total
-                b2s2[e2] = s2
-                b2e1[e2] = int(p1e[me1])
-                b2s1[e2] = int(p1st[me1])
+            # k ads case (k >= 2)
+            for k in range(2, max_ads + 1):
+                me = s - gap_w
+                if me < 0:
+                    continue
+                for prev_e in range(me + 1):
+                    if dp[prev_e, k - 1] > NEG_INF:
+                        total = dp[prev_e, k - 1] + sc
+                        if total > dp[e, k]:
+                            dp[e, k] = total
+                            prev[e, k] = [s, prev_e]
 
-    p2s = np.full(N + 1, NEG_INF, dtype=np.float64)
-    p2e2 = np.full(N + 1, -1, dtype=np.int32)
-    p2s2 = np.full(N + 1, -1, dtype=np.int32)
-    p2e1 = np.full(N + 1, -1, dtype=np.int32)
-    p2s1 = np.full(N + 1, -1, dtype=np.int32)
-    for i in range(N + 1):
-        if i > 0:
-            p2s[i] = p2s[i - 1]
-            p2e2[i] = p2e2[i - 1]
-            p2s2[i] = p2s2[i - 1]
-            p2e1[i] = p2e1[i - 1]
-            p2s1[i] = p2s1[i - 1]
-        if b2s[i] > p2s[i]:
-            p2s[i] = b2s[i]
-            p2e2[i] = i
-            p2s2[i] = b2s2[i]
-            p2e1[i] = b2e1[i]
-            p2s1[i] = b2s1[i]
+    # Find best overall
+    best_total = NEG_INF
+    best_k = 0
+    best_end = 0
+    for k in range(1, max_ads + 1):
+        for e in range(N + 1):
+            if dp[e, k] > best_total:
+                best_total = dp[e, k]
+                best_k = k
+                best_end = e
 
-    # Best triple
-    b3s = np.full(N + 1, NEG_INF, dtype=np.float64)
-    b3e3 = np.full(N + 1, -1, dtype=np.int32)
-    b3s3 = np.full(N + 1, -1, dtype=np.int32)
-    b3e2 = np.full(N + 1, -1, dtype=np.int32)
-    b3s2 = np.full(N + 1, -1, dtype=np.int32)
-    b3e1 = np.full(N + 1, -1, dtype=np.int32)
-    b3s1 = np.full(N + 1, -1, dtype=np.int32)
-    for e3 in range(min_w, N + 1):
-        s3_lo = max(first_start_idx, e3 - max_w)
-        s3_hi = e3 - min_w
-        if s3_lo > s3_hi:
-            continue
-        t_e3 = windows[e3 - 1].t1
-        for s3 in range(s3_hi, s3_lo - 1, -1):
-            if windows[s3].t0 < FIRST_AD_MIN_START_SEC:
-                break
-            dur = t_e3 - windows[s3].t0
-            if dur < AD_MIN_SEC:
-                continue
-            if dur > AD_MAX_SEC:
-                break
-            sc3 = interval_score(s3, e3)
-            me2 = s3 - gap_w
-            if me2 < 0 or p2s[me2] <= NEG_INF:
-                continue
-            total3 = p2s[me2] + sc3
-            if total3 > b3s[e3]:
-                b3s[e3] = total3
-                b3e3[e3] = e3
-                b3s3[e3] = s3
-                b3e2[e3] = int(p2e2[me2])
-                b3s2[e3] = int(p2s2[me2])
-                b3e1[e3] = int(p2e1[me2])
-                b3s1[e3] = int(p2s1[me2])
+    if best_total <= NEG_INF:
+        return []
 
-    p3s = np.full(N + 1, NEG_INF, dtype=np.float64)
-    p3e3 = np.full(N + 1, -1, dtype=np.int32)
-    p3s3 = np.full(N + 1, -1, dtype=np.int32)
-    p3e2 = np.full(N + 1, -1, dtype=np.int32)
-    p3s2 = np.full(N + 1, -1, dtype=np.int32)
-    p3e1 = np.full(N + 1, -1, dtype=np.int32)
-    p3s1 = np.full(N + 1, -1, dtype=np.int32)
-    for i in range(N + 1):
-        if i > 0:
-            p3s[i] = p3s[i - 1]
-            p3e3[i] = p3e3[i - 1]
-            p3s3[i] = p3s3[i - 1]
-            p3e2[i] = p3e2[i - 1]
-            p3s2[i] = p3s2[i - 1]
-            p3e1[i] = p3e1[i - 1]
-            p3s1[i] = p3s1[i - 1]
-        if b3s[i] > p3s[i]:
-            p3s[i] = b3s[i]
-            p3e3[i] = b3e3[i]
-            p3s3[i] = b3s3[i]
-            p3e2[i] = b3e2[i]
-            p3s2[i] = b3s2[i]
-            p3e1[i] = b3e1[i]
-            p3s1[i] = b3s1[i]
+    # Reconstruct
+    intervals: list[tuple[int, int]] = []
+    current_e = best_end
+    current_k = best_k
+    while current_k > 0 and current_e > 0:
+        s = prev[current_e, current_k][0]
+        intervals.append((s, current_e))
+        current_e = prev[current_e, current_k][1]
+        current_k -= 1
 
-    best3_total = NEG_INF
-    best3: list[tuple[int, int]] = []
-    for i in range(N + 1):
-        if p3s[i] > best3_total:
-            best3_total = p3s[i]
-            best3 = [
-                (int(p3s1[i]), int(p3e1[i])),
-                (int(p3s2[i]), int(p3e2[i])),
-                (int(p3s3[i]), int(p3e3[i])),
-            ]
+    intervals.reverse()
+    return intervals
 
-    # Best quadruple
-    best4_total = NEG_INF
-    best4: list[tuple[int, int]] = []
-    for e4 in range(min_w, N + 1):
-        s4_lo = max(first_start_idx, e4 - max_w)
-        s4_hi = e4 - min_w
-        if s4_lo > s4_hi:
-            continue
-        t_e4 = windows[e4 - 1].t1
-        for s4 in range(s4_hi, s4_lo - 1, -1):
-            if windows[s4].t0 < FIRST_AD_MIN_START_SEC:
-                break
-            dur = t_e4 - windows[s4].t0
-            if dur < AD_MIN_SEC:
-                continue
-            if dur > AD_MAX_SEC:
-                break
-            sc4 = interval_score(s4, e4)
-            me3 = s4 - gap_w
-            if me3 < 0 or p3s[me3] <= NEG_INF:
-                continue
-            total4 = p3s[me3] + sc4
-            if total4 > best4_total:
-                best4_total = total4
-                s1 = int(p3s1[me3])
-                e1 = int(p3e1[me3])
-                s2 = int(p3s2[me3])
-                e2 = int(p3e2[me3])
-                s3 = int(p3s3[me3])
-                e3 = int(p3e3[me3])
-                best4 = [(s1, e1), (s2, e2), (s3, e3), (s4, e4)]
-
-    if best4_total > best3_total:
-        return best4
-    return best3
 
 # Step 4 – Refine boundaries
 def _refine_boundary(
@@ -515,8 +393,8 @@ def _build_segments_from_ad_intervals(
     for s, e in ad_intervals:
         for i in range(s, min(e, N)):
             is_ad[i] = True
-    first_ad_start = ad_intervals[0][0]
-    last_ad_end = ad_intervals[-1][1]
+    first_ad_start = ad_intervals[0][0] if ad_intervals else N
+    last_ad_end = ad_intervals[-1][1] if ad_intervals else 0
     segments: list[dict[str, Any]] = []
     i = 0
     while i < N:
@@ -618,7 +496,8 @@ def fuse_bundle_to_segments(
     )
     smooth_edge = _smooth(raw_edge, SMOOTH_HALF_WIN)
 
-    ad_intervals = _find_best_three_ads(smooth_edge, smooth_foreign, windows)
+    # Use generalized version (max 6 ads is more than enough for typical content)
+    ad_intervals = _find_best_ads(smooth_edge, smooth_foreign, windows, max_ads=6)
 
     if ad_intervals:
         refined: list[tuple[int, int]] = []
