@@ -2,7 +2,9 @@
 
 Usage
 -----
-Run from the repo root with PYTHONPATH set so the local packages are importable::
+Run from the repo root with PYTHONPATH set so the local packages are importable.
+
+Exact command (run from repository root):
 
     PYTHONPATH=. python scripts/run_pipeline.py videos_with_ad/test_001.mp4
 
@@ -17,6 +19,8 @@ automatically (player_fusion.py looks them up in ``data/output/``).
 
 Common options
 --------------
+    --skip-analysis        Reuse the existing <stem>_analysis_bundle.json in
+                                                 data/output/ and only run fusion.
   --skip-speech          Skip Whisper transcription (faster; reduces accuracy).
   --skip-audio           Skip the audio modality entirely.
   --model MODEL          Whisper model size (default: small).
@@ -105,13 +109,29 @@ def _run_fusion(bundle_path: Path, segments_out: Path, min_segment_sec: float) -
             )
 
 
+def _bundle_and_segments_paths(video: Path, out_dir: Path) -> tuple[Path, Path]:
+    bundle_path = out_dir / f"{video.stem}_analysis_bundle.json"
+    segments_path = out_dir / f"{video.stem}_segments.json"
+    return bundle_path, segments_path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python scripts/run_pipeline.py",
         description="Run visual + audio + speech + fusion end-to-end on a video.",
     )
-    parser.add_argument("video", type=Path, help="Input video file (.mp4 / .mov / ...).")
+    parser.add_argument("video", type=Path, nargs="?", help="Input video file (.mp4 / .mov / ...).")
+    parser.add_argument("--all-videos", action="store_true", help="Process all videos in videos_with_ad/ directory.")
     parser.add_argument("--out-dir", type=Path, default=Path("data/output"))
+    parser.add_argument("--skip-analysis", action="store_true")
+    parser.add_argument(
+        "--force-analysis",
+        action="store_true",
+        help=(
+            "Force re-running visual/audio analysis even if an existing "
+            "analysis bundle is present in the output directory."
+        ),
+    )
     parser.add_argument("--skip-speech", action="store_true")
     parser.add_argument("--skip-audio", action="store_true")
     parser.add_argument("--model", default="small")
@@ -123,59 +143,113 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-segment-sec", type=float, default=20.0)
     args = parser.parse_args(argv)
 
-    video = args.video.expanduser().resolve(strict=False)
-    if not video.is_file():
-        print(f"Error: video not found: {video}", file=sys.stderr)
-        return 2
+    # Determine which videos to process
+    if args.all_videos:
+        videos_dir = Path("videos_with_ad")
+        if not videos_dir.is_dir():
+            print(f"Error: videos directory not found: {videos_dir}", file=sys.stderr)
+            return 2
+        # Find all video files (common video formats)
+        video_files = sorted(set(
+            v for ext in ["*.mp4", "*.mov", "*.avi", "*.mkv"]
+            for v in videos_dir.glob(ext)
+            if v.is_file()
+        ))
+        if not video_files:
+            print(f"Error: no video files found in {videos_dir}", file=sys.stderr)
+            return 2
+        videos_to_process = video_files
+    else:
+        if args.video is None:
+            parser.print_help()
+            print(f"\nError: either provide a video file or use --all-videos", file=sys.stderr)
+            return 2
+        video = args.video.expanduser().resolve(strict=False)
+        if not video.is_file():
+            print(f"Error: video not found: {video}", file=sys.stderr)
+            return 2
+        videos_to_process = [video]
 
     out_dir = args.out_dir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    bundle_path = out_dir / f"{video.stem}_analysis_bundle.json"
-    segments_path = out_dir / f"{video.stem}_segments.json"
 
-    print(f"Pipeline: {video.name}")
-    print(f"  Bundle  -> {bundle_path}")
-    print(f"  Segments-> {segments_path}")
+    # Process each video
+    return_code = 0
+    for video_idx, video in enumerate(videos_to_process, 1):
+        print(f"\n{'='*60}")
+        print(f"Processing video {video_idx}/{len(videos_to_process)}: {video.name}")
+        print(f"{'='*60}")
 
-    total_steps = 1 + (0 if args.skip_audio else 1) + 1
-    step = 0
+        bundle_path, segments_path = _bundle_and_segments_paths(video, out_dir)
 
-    step += 1
-    t0 = time.monotonic()
-    _print_step(step, total_steps, "Visual analysis")
-    _run_visual(video, bundle_path, args.sample_fps, args.window_sec)
-    print(f"     Took {time.monotonic() - t0:.1f}s")
+        print(f"Pipeline: {video.name}")
+        print(f"  Bundle  -> {bundle_path}")
+        print(f"  Segments-> {segments_path}")
 
-    if not args.skip_audio:
+        has_existing_bundle = bundle_path.is_file()
+
+        # Decide whether to reuse an existing bundle.
+        # - `--skip-analysis` explicitly requests reuse and errors if missing.
+        # - If a bundle exists and `--force-analysis` is not passed, reuse it automatically.
+        # - Otherwise run visual/audio analysis.
+        if args.skip_analysis:
+            if not has_existing_bundle:
+                print(f"Error: analysis bundle not found: {bundle_path}", file=sys.stderr)
+                return_code = 2
+                continue
+            reuse_bundle = True
+        elif has_existing_bundle and not args.force_analysis:
+            reuse_bundle = True
+        else:
+            reuse_bundle = False
+
+        total_steps = 1 if reuse_bundle else 1 + (0 if args.skip_audio else 1) + 1
+        step = 0
+
+        if not reuse_bundle:
+            step += 1
+            t0 = time.monotonic()
+            _print_step(step, total_steps, "Visual analysis")
+            _run_visual(video, bundle_path, args.sample_fps, args.window_sec)
+            print(f"     Took {time.monotonic() - t0:.1f}s")
+
+            if not args.skip_audio:
+                step += 1
+                t0 = time.monotonic()
+                _print_step(
+                    step,
+                    total_steps,
+                    "Audio analysis" + ("" if args.skip_speech else " + speech"),
+                )
+                _run_audio(
+                    video,
+                    bundle_path,
+                    window_sec=args.audio_window_sec,
+                    with_speech=not args.skip_speech,
+                    model_name=args.model,
+                    vad=args.vad,
+                    language=args.language,
+                )
+                print(f"     Took {time.monotonic() - t0:.1f}s")
+        else:
+            print("  Reusing existing analysis bundle")
+
         step += 1
         t0 = time.monotonic()
-        _print_step(
-            step,
-            total_steps,
-            "Audio analysis" + ("" if args.skip_speech else " + speech"),
-        )
-        _run_audio(
-            video,
-            bundle_path,
-            window_sec=args.audio_window_sec,
-            with_speech=not args.skip_speech,
-            model_name=args.model,
-            vad=args.vad,
-            language=args.language,
-        )
+        _print_step(step, total_steps, "Fusion")
+        _run_fusion(bundle_path, segments_path, args.min_segment_sec)
         print(f"     Took {time.monotonic() - t0:.1f}s")
 
-    step += 1
-    t0 = time.monotonic()
-    _print_step(step, total_steps, "Fusion")
-    _run_fusion(bundle_path, segments_path, args.min_segment_sec)
-    print(f"     Took {time.monotonic() - t0:.1f}s")
+        print()
+        print(f"Done with {video.name}")
 
-    print()
-    print(f"Done. Launch the player with:")
+    print(f"\n{'='*60}")
+    print(f"All videos processed.")
+    print(f"{'='*60}")
+    print(f"To launch the player with:")
     print(f"  PYTHONPATH=. python -m player.player")
-    print(f"  (open '{video}' in the file dialog; segments load from {segments_path.name})")
-    return 0
+    print(f"  (open any video file in the file dialog; segments load from data/output/)")
+    return return_code
 
 
 if __name__ == "__main__":

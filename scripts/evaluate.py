@@ -38,10 +38,43 @@ from pathlib import Path
 
 # Loading helpers
 def _load_reference_ads(video_info_path: Path) -> list[dict]:
-    """Return list of {start, end} dicts for all ad segments in a video_info JSON."""
-    from schemas.video_info import load_video_info_doc, reference_ad_segments_player_shape
-    doc = load_video_info_doc(video_info_path)
-    return reference_ad_segments_player_shape(doc)  # already {start, end, label, kind, source}
+    """Robust loader - prefer Pydantic, fallback to direct JSON."""
+    # Try new format via schemas first
+    try:
+        from schemas.video_info import load_video_info_doc
+        doc = load_video_info_doc(video_info_path)
+        
+        if hasattr(doc, 'timeline_segments') and doc.timeline_segments:
+            ads = []
+            for seg in doc.timeline_segments:
+                if getattr(seg, 'type', None) == 'ad':
+                    ads.append({
+                        "start": float(seg.final_video_start_seconds),
+                        "end": float(seg.final_video_end_seconds),
+                        "label": "Advertisement",
+                        "kind": "non-content"
+                    })
+            if ads:
+                return ads
+    except Exception as e:
+        print(f"  Warning: Pydantic loader failed for {video_info_path}: {e}")
+
+    # Direct JSON fallback (works for current test_010.json)
+    try:
+        data = json.loads(video_info_path.read_text(encoding="utf-8"))
+        ads = []
+        for seg in data.get("timeline_segments", []):
+            if seg.get("type") == "ad":
+                ads.append({
+                    "start": float(seg["final_video_start_seconds"]),
+                    "end": float(seg["final_video_end_seconds"]),
+                    "label": "Advertisement",
+                    "kind": "non-content"
+                })
+        return ads
+    except Exception as e:
+        print(f"  Warning: Could not parse {video_info_path}: {e}")
+        return []
 
 
 def _load_predicted_ads(segments_path: Path) -> list[dict]:
@@ -52,17 +85,14 @@ def _load_predicted_ads(segments_path: Path) -> list[dict]:
     # Change this to kind == "non-content" for a broader non-content evaluation.
     return [s for s in all_segs if s.get("label") == "Advertisement"]
 
-
 # Metric computation
 def _overlap_seconds(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
     return max(0.0, min(a_end, b_end) - max(a_start, b_start))
-
 
 def _iou(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
     intersection = _overlap_seconds(a_start, a_end, b_start, b_end)
     union = (a_end - a_start) + (b_end - b_start) - intersection
     return intersection / union if union > 1e-9 else 0.0
-
 
 def _temporal_precision_recall(
     predicted: list[dict],

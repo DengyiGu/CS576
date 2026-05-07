@@ -1,36 +1,4 @@
-﻿"""
-Multimodal fusion layer 鈥?edge-based ad detection with variable ad count.
-
-Strategy (redesigned)
----------------------
-Ads create TWO hard cuts:
-  content 鈫?ad  : abrupt palette shift, audio change, often speech stops
-  ad 鈫?content  : abrupt palette shift, audio change, often speech resumes
-
-Rather than maximising a foreignness score over an interval (which inflates
-interval sizes), we:
-
-1. Compute a per-window "edge strength" at each boundary between consecutive
-   windows: palette_delta already measures this.  We combine it with an audio-
-   change signal and a speech-gap signal to form a "cut score".
-
-2. Find all candidate cut points above a threshold 鈥?these are potential
-   ad start/end boundaries.
-
-3. Score candidate cut pairs and keep high-confidence, non-overlapping
-   advertisement intervals:
-       score(s,e) = edge_strength(s) + edge_strength(e)
-                   + foreignness_bonus(s, e)   # content inside is "foreign"
-   subject to:
-       AD_MIN_SEC 鈮?e鈭抯 鈮?AD_MAX_SEC
-       candidate confidence threshold
-       duplicate/overlap suppression
-
-4. Assign non-ad labels conservatively: Core Content by default, then at most
-   one Intro/Outro on non-ad edge regions if explicit structure signals exist.
-"""
-
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -732,7 +700,7 @@ def _compute_edge_scores(
     return edge
 
 
-def _smooth(scores: np.ndarray, half_win: int) -> np.ndarray:
+def _smooth(scores: np.ndarray, half_win: int = SMOOTH_HALF_WIN) -> np.ndarray:
     if half_win <= 0:
         return scores.copy()
     N = len(scores)
@@ -1167,19 +1135,11 @@ def _find_ad_intervals(
 def _refine_boundary(
     idx: int,
     edge_scores: np.ndarray,
-    direction: str,  # "start" or "end"
+    direction: str,
     windows: list[VisualWindow],
     search_sec: float = 15.0,
 ) -> int:
-    """
-    Given a coarse window index, search within 卤search_sec for the window
-    with the highest edge score and return that index as the refined boundary.
-
-    For "start": the boundary is the cut INTO the ad 鈫?look for the highest
-                 edge score just at/after the coarse start.
-    For "end":   the boundary is the cut OUT of the ad 鈫?look for the highest
-                 edge score just at/before the coarse end.
-    """
+    """Improved from main"""
     N = len(windows)
     window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
     search_w = max(1, int(search_sec / window_sec))
@@ -1193,7 +1153,6 @@ def _refine_boundary(
 
     if lo >= hi:
         return idx
-
     best_i = lo + int(np.argmax(edge_scores[lo:hi]))
     return best_i
 
@@ -2205,177 +2164,35 @@ def fuse_bundle_to_segments(
     windows  = bundle.visual.windows
     duration = bundle.visual.duration_sec or bundle.duration_sec
 
-    # Compute per-window foreignness (interior signal)
-    raw_foreign = _compute_foreignness_scores(
-        windows, bundle.audio_windows, bundle.speech_spans, duration
-    )
-    smooth_foreign = _smooth(raw_foreign, SMOOTH_HALF_WIN)
+    raw_foreign = _compute_foreignness_scores(windows, bundle.audio_windows, bundle.speech_spans, duration)
+    smooth_foreign = _smooth(raw_foreign)
 
-    # Compute per-boundary edge scores (cut signal)
-    raw_edge    = _compute_edge_scores(
-        windows, bundle.audio_windows, bundle.speech_spans, duration
-    )
-    smooth_edge = _smooth(raw_edge, SMOOTH_HALF_WIN)
+    raw_edge = _compute_edge_scores(windows, bundle.audio_windows, bundle.speech_spans, duration)
+    smooth_edge = _smooth(raw_edge)
 
-    # Find high-confidence ad intervals using visual/audio interior,
-    # boundary, explicit ad text, and content-domain penalty signals.
     text_scores = _compute_text_ad_scores(windows, bundle.speech_spans)
     content_penalties = _compute_content_text_penalties(windows, bundle.speech_spans)
-    ad_intervals = _find_ad_intervals(
-        smooth_edge,
-        smooth_foreign,
-        windows,
-        text_scores=text_scores,
-        content_penalties=content_penalties,
-    )
-    text_anchor_intervals = _find_text_anchor_intervals(
-        windows,
-        bundle.speech_spans,
-        smooth_edge,
-        smooth_foreign,
-        text_scores,
-        content_penalties,
-    )
+
+    ad_intervals = _find_ad_intervals(smooth_edge, smooth_foreign, windows, text_scores, content_penalties)
+    text_anchor_intervals = _find_text_anchor_intervals(windows, bundle.speech_spans, smooth_edge, smooth_foreign, text_scores, content_penalties)
+
     if text_anchor_intervals:
-        # Text anchors are strong evidence that an ad exists nearby, but they
-        # are not always centered in the ad. Keep visual/audio candidates too
-        # and let the interval support score pick the better boundary pair.
-        ad_intervals = _suppress_close_ad_intervals(
-            ad_intervals + text_anchor_intervals,
-            windows,
-            smooth_foreign,
-            text_scores,
-            content_penalties,
-            smooth_edge,
-            bundle.speech_spans,
-        )
+        ad_intervals = _suppress_close_ad_intervals(ad_intervals + text_anchor_intervals, windows, smooth_foreign, text_scores, content_penalties, smooth_edge, bundle.speech_spans)
 
     if ad_intervals:
-        # Refine each boundary to the nearest local edge maximum
         refined: list[tuple[int, int]] = []
         for s, e in ad_intervals:
-            base_interval = (s, e)
-            rs = _refine_boundary(s, smooth_edge, "start", windows, search_sec=12.0)
-            re = _refine_boundary(e, smooth_edge, "end",   windows, search_sec=12.0)
-            rs = min(rs, s)
-            re = max(re, e)
-            # Ensure minimum duration after refinement
-            window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
-            min_w = max(1, int(AD_MIN_SEC / window_sec))
-            if re - rs < min_w:
-                re = min(len(windows), rs + min_w)
-            interval_duration = windows[re - 1].t1 - windows[rs].t0
-            interval_text_mean = float(text_scores[rs:re].mean()) if re > rs else 0.0
-            interval_foreign_mean = float(smooth_foreign[rs:re].mean()) if re > rs else 0.0
-            start_edge = float(smooth_edge[rs]) if 0 <= rs < len(smooth_edge) else 0.0
-            end_edge = float(smooth_edge[re]) if 0 <= re < len(smooth_edge) else 0.0
-            has_strong_boundary_pair = min(start_edge, end_edge) >= 0.32
-            should_expand_text_ad = (
-                interval_text_mean >= 0.15
-                and (not has_strong_boundary_pair or interval_duration <= AD_MIN_SEC + 2.0)
-            )
-            should_expand_visual_ad = (
-                interval_text_mean < 0.15
-                and interval_foreign_mean >= 0.25
-            )
-            if interval_duration <= 45.0 and (should_expand_text_ad or should_expand_visual_ad):
-                rs, re = _expand_ad_interval(
-                    rs,
-                    re,
-                    windows,
-                    smooth_foreign,
-                    text_scores,
-                    content_penalties,
-                    search_sec=25.0 if should_expand_text_ad else 12.0,
-                    aggressive_visual=should_expand_text_ad or should_expand_visual_ad,
-                )
-            final_interval = (rs, re)
-            if not _passes_final_ad_filters(
-                final_interval,
-                windows,
-                smooth_edge,
-                smooth_foreign,
-                text_scores,
-                content_penalties,
-                bundle.speech_spans,
-            ):
-                base_duration = windows[e - 1].t1 - windows[s].t0
-                base_has_reliable_signal = (
-                    base_duration >= 40.0
-                    or float(text_scores[s:e].max()) >= 0.15
-                    or _has_text_anchor_in_range(
-                        windows[s].t0,
-                        windows[e - 1].t1,
-                        bundle.speech_spans,
-                    )
-                )
-                if (
-                    base_interval == final_interval
-                    or not base_has_reliable_signal
-                    or not _passes_final_ad_filters(
-                        base_interval,
-                        windows,
-                        smooth_edge,
-                        smooth_foreign,
-                        text_scores,
-                        content_penalties,
-                        bundle.speech_spans,
-                    )
-                ):
-                    continue
-                rs, re = base_interval
-            has_text_anchor_after_refine = _has_text_anchor_in_range(
-                windows[rs].t0,
-                windows[re - 1].t1,
-                bundle.speech_spans,
-            )
-            opt_rs, opt_re = _optimize_interval_boundaries(
-                (rs, re),
-                windows,
-                smooth_edge,
-                smooth_foreign,
-                text_scores,
-                content_penalties,
-                bundle.speech_spans,
-                search_sec=28.0,
-            )
-            if has_text_anchor_after_refine:
-                window_sec = windows[0].t1 - windows[0].t0 if windows else 1.0
-                max_anchor_shift_w = 0
-                if opt_rs > rs:
-                    opt_rs = min(opt_rs, rs + max_anchor_shift_w)
-                if opt_re > re:
-                    opt_re = min(opt_re, re + max_anchor_shift_w)
-                elif opt_re < re:
-                    opt_re = max(opt_re, re - max_anchor_shift_w)
-            rs, re = opt_rs, opt_re
-            if not _passes_final_ad_filters(
-                (rs, re),
-                windows,
-                smooth_edge,
-                smooth_foreign,
-                text_scores,
-                content_penalties,
-                bundle.speech_spans,
-            ):
-                continue
+            rs = _refine_boundary(s, smooth_edge, "start", windows)
+            re = _refine_boundary(e, smooth_edge, "end", windows)
+            rs, re = _expand_ad_interval(rs, re, windows, smooth_foreign, text_scores, content_penalties)
             refined.append((rs, re))
 
-        refined = _suppress_close_ad_intervals(
-            refined,
-            windows,
-            smooth_foreign,
-            text_scores,
-            content_penalties,
-            smooth_edge,
-            bundle.speech_spans,
-        )
+        refined = _suppress_close_ad_intervals(refined, windows, smooth_foreign, text_scores, content_penalties, smooth_edge, bundle.speech_spans)
         refined = _trim_text_anchor_tails(refined, windows, bundle.speech_spans)
         refined = _trim_confirmed_ad_tails(refined, windows, content_penalties, text_scores)
+
         return _build_segments_from_ad_intervals(refined, windows, duration, bundle.speech_spans)
 
-    # No confident ads found. Still classify conservative edge-only
-    # non-content such as an explicit intro/outro if present.
     return _build_segments_from_ad_intervals([], windows, duration, bundle.speech_spans)
 
 
@@ -2388,7 +2205,7 @@ def write_segments_json(segments: list[dict[str, Any]], out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": "1.0",
-        "source":         "fusion",
-        "segments":       segments,
+        "source": "fusion",
+        "segments": segments,
     }
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
