@@ -122,6 +122,19 @@ AD_MAX_SEC  = 130.0   # tightened from 200 — longest known ad is 118.2s
 # Minimum content gap between two consecutive ads
 GAP_MIN_SEC = 60.0
 
+# Boundary extension: after the DP picks (s, e), walk each boundary
+# outward up to ``EXTEND_SEARCH_SEC`` seconds while local foreignness
+# stays above ``EXTEND_KEEP_RATIO`` * interior_mean(s, e). Real broadcast
+# ads are 30-120 s long; the DP sometimes locks onto a 20-40 s
+# high-density chunk at the *front* of a long ad and stops, leaving
+# 30+ s of high-foreignness ad time uncovered (e.g. test_001 GT ad #1
+# is 118 s, the K=3 pick is 74 s, edge_e at 184 s = 0.66 with
+# foreignness still > 0.7 for ~40 more seconds before it really
+# drops). Extension reads the *raw* per-window foreignness rather
+# than re-running the DP.
+EXTEND_SEARCH_SEC  = 30.0
+EXTEND_KEEP_RATIO  = 0.70
+
 # First ad cannot start before this many seconds into the video
 FIRST_AD_MIN_START_SEC = 30.0
 
@@ -1054,6 +1067,58 @@ def _select_num_ads_auto(
 # Step 4 – Refine boundaries using local edge maxima
 # ---------------------------------------------------------------------------
 
+def _extend_boundaries_along_foreignness(
+    s: int,
+    e: int,
+    foreign_scores: np.ndarray,
+    windows: list[VisualWindow],
+    *,
+    search_sec: float = EXTEND_SEARCH_SEC,
+    keep_ratio: float = EXTEND_KEEP_RATIO,
+    max_total_sec: float = AD_MAX_SEC,
+) -> tuple[int, int]:
+    """Extend ``(s, e)`` outward while the local foreignness signal stays
+    above ``keep_ratio`` * the interval's mean foreignness.
+
+    Walk left from ``s`` and right from ``e``. At each step look at the
+    window we're considering crossing; if its foreignness is at least
+    ``keep_ratio * interior_mean(s, e)``, accept it. Stop when the
+    window drops below the threshold, when we've extended ``search_sec``
+    on that side, or when the total interval would exceed
+    ``max_total_sec``.
+
+    The interior_mean is computed on the *original* ``(s, e)`` (it
+    does not drift as we extend), so a pick like (110, 184) with
+    interior_mean = 0.885 only extends through windows whose foreignness
+    >= 0.531.
+    """
+    if e <= s or len(windows) == 0:
+        return s, e
+    window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
+    if window_sec <= 0.0:
+        return s, e
+
+    interior_mean = float(foreign_scores[s:e].mean())
+    threshold = keep_ratio * interior_mean
+    max_w = int(max_total_sec / window_sec)
+    search_w = max(0, int(search_sec / window_sec))
+
+    s_new = s
+    while s_new > 0 and (s - s_new) < search_w and (e - s_new) < max_w:
+        if float(foreign_scores[s_new - 1]) < threshold:
+            break
+        s_new -= 1
+
+    e_new = e
+    n = len(foreign_scores)
+    while e_new < n and (e_new - e) < search_w and (e_new + 1 - s_new) < max_w:
+        if float(foreign_scores[e_new]) < threshold:
+            break
+        e_new += 1
+
+    return s_new, e_new
+
+
 def _refine_boundary(
     idx: int,
     edge_scores: np.ndarray,
@@ -1297,17 +1362,43 @@ def fuse_bundle_to_segments(
         )
 
     if ad_intervals and len(ad_intervals) == chosen_k and chosen_k > 0:
-        # Refine each boundary to the nearest local edge maximum
+        # Refine each boundary to the nearest local edge maximum, then
+        # extend outward along the foreignness signal so picks that the
+        # DP locked onto a short high-density chunk inside a longer
+        # real ad recover the rest.
         refined: list[tuple[int, int]] = []
+        window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
         for s, e in ad_intervals:
             rs = _refine_boundary(s, smooth_edge, "start", windows, search_sec=12.0)
             re = _refine_boundary(e, smooth_edge, "end",   windows, search_sec=12.0)
-            # Ensure minimum duration after refinement
-            window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
             min_w = max(1, int(AD_MIN_SEC / window_sec))
             if re - rs < min_w:
                 re = min(len(windows), rs + min_w)
+            rs, re = _extend_boundaries_along_foreignness(
+                rs, re, smooth_foreign, windows,
+                search_sec=EXTEND_SEARCH_SEC,
+                keep_ratio=EXTEND_KEEP_RATIO,
+            )
             refined.append((rs, re))
+
+        # Sort by start, then enforce GAP_MIN_SEC between extended picks
+        # so neighbouring extensions don't merge or overlap.
+        refined.sort(key=lambda iv: iv[0])
+        gap_w = max(1, int(GAP_MIN_SEC / window_sec))
+        for i in range(1, len(refined)):
+            prev_s, prev_e = refined[i - 1]
+            cur_s, cur_e = refined[i]
+            if cur_s - prev_e < gap_w:
+                # Pull the boundary inward equally on both sides.
+                shrink_total = gap_w - (cur_s - prev_e)
+                shrink_left = shrink_total // 2
+                shrink_right = shrink_total - shrink_left
+                new_prev_e = max(prev_s + max(1, int(AD_MIN_SEC / window_sec)),
+                                 prev_e - shrink_left)
+                new_cur_s = min(cur_e - max(1, int(AD_MIN_SEC / window_sec)),
+                                cur_s + shrink_right)
+                refined[i - 1] = (prev_s, new_prev_e)
+                refined[i] = (new_cur_s, cur_e)
 
         return _build_segments_from_ad_intervals(refined, windows, duration)
 
