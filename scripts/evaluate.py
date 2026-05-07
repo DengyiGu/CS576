@@ -38,13 +38,13 @@ from pathlib import Path
 
 # Loading helpers
 def _load_reference_ads(video_info_path: Path) -> list[dict]:
-    """Robust loader for both old and new formats."""
+    """Robust loader - prefer Pydantic, fallback to direct JSON."""
+    # Try new format via schemas first
     try:
         from schemas.video_info import load_video_info_doc
         doc = load_video_info_doc(video_info_path)
         
         if hasattr(doc, 'timeline_segments') and doc.timeline_segments:
-            # New format
             ads = []
             for seg in doc.timeline_segments:
                 if getattr(seg, 'type', None) == 'ad':
@@ -54,15 +54,24 @@ def _load_reference_ads(video_info_path: Path) -> list[dict]:
                         "label": "Advertisement",
                         "kind": "non-content"
                     })
-            return ads
-    except Exception:
-        pass
+            if ads:
+                return ads
+    except Exception as e:
+        print(f"  Warning: Pydantic loader failed for {video_info_path}: {e}")
 
-    # Fallback: try old schema
+    # Direct JSON fallback (works for current test_010.json)
     try:
-        from schemas.video_info import reference_ad_segments_player_shape
-        doc = load_video_info_doc(video_info_path)  # try again
-        return reference_ad_segments_player_shape(doc)
+        data = json.loads(video_info_path.read_text(encoding="utf-8"))
+        ads = []
+        for seg in data.get("timeline_segments", []):
+            if seg.get("type") == "ad":
+                ads.append({
+                    "start": float(seg["final_video_start_seconds"]),
+                    "end": float(seg["final_video_end_seconds"]),
+                    "label": "Advertisement",
+                    "kind": "non-content"
+                })
+        return ads
     except Exception as e:
         print(f"  Warning: Could not parse {video_info_path}: {e}")
         return []
