@@ -234,5 +234,5 @@ __marimo__/
 # Local audio classification models (YAMNet ONNX) — downloaded during setup
 /audio/models/
 
-# Local working notes (kept private to each contributor)
-SESSION_NOTES.md
+# SESSION_NOTES.md is now tracked on the branch so it syncs across
+# machines / contributors (was previously local-only)
