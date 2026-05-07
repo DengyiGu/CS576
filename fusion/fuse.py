@@ -99,6 +99,21 @@ MIN_NUM_ADS         = 3
 # despite K=5 being better at 0.575).
 MAX_NUM_ADS         = 5
 MIN_MARGINAL_RATIO  = 0.90
+# Auto-K interior-mean floor. The DP can find K *intervals* whose total
+# score is high even when one of the K is a noise plateau — the marginal-
+# gain ratio doesn't always catch this because the K-stage solution
+# re-optimises and absorbs the noise interval at high local quality. The
+# *minimum* normalised foreignness across all K chosen intervals, on the
+# other hand, drops sharply when one of them is fake: at the K where a
+# fake ad enters, min interior_mean falls from ~0.5-0.9 to ~0.1-0.3.
+# Per the diagnostic at scripts/interior_diagnostic.py, 0.40 cleanly
+# separates real-ad from fake-ad transitions on every cached video. The
+# floor is also used to *override* MIN_NUM_ADS: if interior collapses
+# below the floor before MIN_NUM_ADS is reached, we accept the smaller
+# K rather than padding with junk (e.g. test_002 has only 2 strong ads
+# and K=3's third pick has interior_mean 0.31 — accepting K=2 gives a
+# F1 of 0.598 vs K=3's 0.520).
+MIN_INTERIOR_MEAN_FLOOR = 0.40
 
 # Ad duration bounds (seconds) — ground truth range is ~28–118s
 AD_MIN_SEC  = 20.0
@@ -938,6 +953,27 @@ def _find_best_k_ads(
     return best_total, intervals
 
 
+def _min_interior_mean(
+    foreign_scores: np.ndarray, intervals: list[tuple[int, int]]
+) -> float:
+    """Min normalised foreignness mean across the K chosen intervals.
+
+    The foreignness array is normalised by its global max so values are in
+    ``[0, 1]``; an interval mean near 1.0 is "saturated ad signal" and one
+    near 0.1 is "essentially content". Returns ``1.0`` for the empty input
+    so an empty K=0 selection isn't treated as a collapse.
+    """
+    if not intervals:
+        return 1.0
+    f_max = float(foreign_scores.max()) + 1e-9
+    norm = foreign_scores / f_max
+    means = [
+        float(norm[s:e].mean()) if e > s else 0.0
+        for s, e in intervals
+    ]
+    return min(means) if means else 1.0
+
+
 def _select_num_ads_auto(
     edge_scores: np.ndarray,
     foreign_scores: np.ndarray,
@@ -946,23 +982,30 @@ def _select_num_ads_auto(
     max_k: int,
     min_marginal_ratio: float,
     min_k: int = MIN_NUM_ADS,
+    min_interior_mean_floor: float = MIN_INTERIOR_MEAN_FLOOR,
 ) -> tuple[int, list[tuple[int, int]]]:
     """
-    Auto-select K by running the DP for k = 1..max_k and stopping when the
-    K-th ad's marginal score falls below ``min_marginal_ratio`` of the first
-    (best) ad's score.
+    Auto-select K by running the DP for k = 1..max_k and stopping at the
+    first K+1 transition that fails *either* of two rules:
 
-    Marginal score for the K-th ad is ``total_K - total_{K-1}`` (with
-    ``total_0 = 0``).  Because the DP is jointly optimal at each K, the best
-    K-tuple can re-arrange earlier ads, so the marginal series is not strictly
-    monotone, but for typical inputs it decreases as K exceeds the true ad
-    count.
+      1. Marginal-gain ratio: ``total_{k+1} - total_k`` >=
+         ``min_marginal_ratio`` * (first ad's marginal score).
+      2. Interior-mean floor: the *minimum* normalised interior_mean
+         across the K+1 chosen intervals stays >=
+         ``min_interior_mean_floor``.
 
-    On real broadcast video the per-K interval scores are quite compressed
-    (g_2 / g_1 ≈ 0.9 even when 3 ads are clearly present), so the rule
-    under-detects below ``min_k``.  We clamp the chosen K up to ``min_k`` to
-    keep behaviour aligned with the "expect at least 3 ads" prior while
-    still allowing 4 / 5 when the marginal series justifies it.
+    Rule 2 catches the failure mode rule 1 doesn't: when the K-stage DP
+    re-optimises and absorbs a noise plateau as one of K equally-scored
+    intervals (so the marginal stays near 1.0), the noise interval shows
+    up as a sharp drop in the *minimum* per-interval interior mean. The
+    diagnostic at scripts/interior_diagnostic.py shows this transition
+    is clean on every cached video — fakes drop from ~0.6-0.9 to ~0.1-0.3.
+
+    ``min_k`` is a *soft* floor: we bump K up to ``min_k`` only when no
+    interior-collapse was observed below ``min_k``. If interior collapses
+    earlier (e.g. test_002 has only 2 strong ads, K=3's third pick has
+    interior 0.31), we respect the smaller K instead of padding with
+    junk to satisfy the prior.
 
     Returns ``(K_chosen, intervals_at_K_chosen)``.
     """
@@ -971,30 +1014,38 @@ def _select_num_ads_auto(
 
     totals: list[float] = [0.0]
     interval_sets: list[list[tuple[int, int]]] = [[]]
+    min_interiors: list[float] = [1.0]
     for k in range(1, max_k + 1):
         total_k, intervals_k = _find_best_k_ads(edge_scores, foreign_scores, windows, k)
         if not intervals_k:
             break
         totals.append(total_k)
         interval_sets.append(intervals_k)
+        min_interiors.append(_min_interior_mean(foreign_scores, intervals_k))
 
     if len(totals) <= 1:
         return 0, []
 
     first_gain = totals[1] - totals[0]
-    if first_gain <= 0.0:
-        chosen_k = min(min_k, len(totals) - 1)
-        return chosen_k, interval_sets[chosen_k]
 
+    # Walk K from 1 up, accepting each K+1 only when both rules pass.
     chosen_k = 1
+    interior_collapse_seen = False
     for k in range(2, len(totals)):
-        gain_k = totals[k] - totals[k - 1]
-        if gain_k >= min_marginal_ratio * first_gain:
-            chosen_k = k
-        else:
+        ratio_ok = first_gain > 0.0 and (totals[k] - totals[k - 1]) >= min_marginal_ratio * first_gain
+        interior_ok = min_interiors[k] >= min_interior_mean_floor
+        if not interior_ok:
+            interior_collapse_seen = True
             break
+        if not ratio_ok:
+            break
+        chosen_k = k
 
-    chosen_k = max(chosen_k, min_k)
+    # Soft floor: only raise to ``min_k`` when the interior signal hasn't
+    # already told us "stop". On videos where the prior over-counts (only
+    # 2 real ads), accepting K_chosen < min_k preserves precision.
+    if not interior_collapse_seen and chosen_k < min_k:
+        chosen_k = min(min_k, len(interval_sets) - 1)
     chosen_k = min(chosen_k, len(interval_sets) - 1)
     return chosen_k, interval_sets[chosen_k]
 

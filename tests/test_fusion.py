@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from schemas.modality import AnalysisBundle, AudioWindow, SpeechSpan, VisualTrack, VisualWindow
@@ -11,6 +12,7 @@ from fusion.fuse import (
     _count_lexicon_hits,
     _has_sponsorship_phrase,
     _loudness_jump_score,
+    _min_interior_mean,
     _speech_text_ad_signal,
     _spectral_flatness_score,
     _transcript_density_score,
@@ -418,3 +420,35 @@ def test_yamnet_helpers_return_zero_on_missing_inputs() -> None:
     assert _yamnet_music_score(0.30, None) == 0.0
     assert _yamnet_nonspeech_score(None, 0.30) == 0.0
     assert _yamnet_nonspeech_score(0.30, None) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Auto-K interior helper
+# ---------------------------------------------------------------------------
+
+def test_min_interior_mean_picks_lowest_mean_normalised_to_global_max() -> None:
+    # Foreignness peaks at 1.0, so normalisation is identity.
+    foreign = np.array([0.9, 0.8, 0.1, 0.2, 1.0, 0.5, 0.05])
+    intervals = [(0, 2), (4, 6)]
+    # Means: (0.9+0.8)/2=0.85; (1.0+0.5)/2=0.75. Min=0.75.
+    assert _min_interior_mean(foreign, intervals) == pytest.approx(0.75)
+
+
+def test_min_interior_mean_normalises_by_global_max() -> None:
+    foreign = np.array([0.4, 0.6, 0.2, 0.5])  # max = 0.6
+    intervals = [(0, 2)]  # mean = 0.5; normalised = 0.5 / 0.6 ≈ 0.833.
+    assert _min_interior_mean(foreign, intervals) == pytest.approx(
+        0.5 / (0.6 + 1e-9)
+    )
+
+
+def test_min_interior_mean_returns_one_for_empty_input() -> None:
+    foreign = np.array([0.5, 0.5])
+    assert _min_interior_mean(foreign, []) == 1.0
+
+
+def test_min_interior_mean_handles_zero_width_interval() -> None:
+    foreign = np.array([0.5, 0.4, 0.3])
+    # The interval (1, 1) has width 0; helper should treat it as 0.0 and
+    # surface that as the minimum.
+    assert _min_interior_mean(foreign, [(0, 2), (1, 1)]) == 0.0
