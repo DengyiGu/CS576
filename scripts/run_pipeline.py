@@ -57,6 +57,32 @@ def _run_visual(video: Path, bundle_out: Path, sample_fps: float, window_sec: fl
     write_analysis_bundle_json(bundle, bundle_out)
     print(f"     Wrote bundle -> {bundle_out}")
 
+def _run_ocr(video: Path, bundle_path: Path) -> None:
+    from ocr.analyze import build_ocr_spans
+    from schemas.modality import AnalysisBundle
+
+    bundle = AnalysisBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
+
+    print("     Running OCR (this can be slow)...")
+    ocr_spans = build_ocr_spans(
+        video,
+        sample_every_sec=3.0,
+        span_sec=4.0,
+        min_confidence=0.35,
+        allow_download=False,  # set to False after first run to avoid re-downloading models
+        # gpu=True,          # uncomment if you have GPU + CUDA
+    )
+
+    # Merge OCR spans with existing speech spans
+    if not hasattr(bundle, 'speech_spans') or bundle.speech_spans is None:
+        bundle.speech_spans = []
+    
+    bundle.speech_spans.extend(ocr_spans)
+    print(f"     OCR: added {len(ocr_spans)} text spans")
+
+    bundle_path.write_text(bundle.model_dump_json(indent=2), encoding="utf-8")
+    print(f"     Updated bundle with OCR -> {bundle_path}")
+
 
 def _run_audio(
     video: Path,
@@ -141,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--window-sec", type=float, default=2.0)
     parser.add_argument("--audio-window-sec", type=float, default=1.0)
     parser.add_argument("--min-segment-sec", type=float, default=20.0)
+    parser.add_argument("--ocr", action="store_true", help="Run OCR on frames for brand/logo detection")
     args = parser.parse_args(argv)
 
     # Determine which videos to process
@@ -188,10 +215,6 @@ def main(argv: list[str] | None = None) -> int:
 
         has_existing_bundle = bundle_path.is_file()
 
-        # Decide whether to reuse an existing bundle.
-        # - `--skip-analysis` explicitly requests reuse and errors if missing.
-        # - If a bundle exists and `--force-analysis` is not passed, reuse it automatically.
-        # - Otherwise run visual/audio analysis.
         if args.skip_analysis:
             if not has_existing_bundle:
                 print(f"Error: analysis bundle not found: {bundle_path}", file=sys.stderr)
@@ -203,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             reuse_bundle = False
 
-        total_steps = 1 if reuse_bundle else 1 + (0 if args.skip_audio else 1) + 1
+        total_steps = 1 if reuse_bundle else 1 + (0 if args.skip_audio else 1) + (1 if args.ocr else 0) + 1
         step = 0
 
         if not reuse_bundle:
@@ -213,6 +236,13 @@ def main(argv: list[str] | None = None) -> int:
             _run_visual(video, bundle_path, args.sample_fps, args.window_sec)
             print(f"     Took {time.monotonic() - t0:.1f}s")
 
+            if args.ocr:
+                step += 1
+                t0 = time.monotonic()
+                _print_step(step, total_steps, "OCR analysis")
+                _run_ocr(video, bundle_path)
+                print(f"     Took {time.monotonic() - t0:.1f}s")
+
             if not args.skip_audio:
                 step += 1
                 t0 = time.monotonic()
@@ -220,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
                     step,
                     total_steps,
                     "Audio analysis" + ("" if args.skip_speech else " + speech"),
-                )
+                )   
                 _run_audio(
                     video,
                     bundle_path,
