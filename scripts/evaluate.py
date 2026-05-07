@@ -38,10 +38,34 @@ from pathlib import Path
 
 # Loading helpers
 def _load_reference_ads(video_info_path: Path) -> list[dict]:
-    """Return list of {start, end} dicts for all ad segments in a video_info JSON."""
-    from schemas.video_info import load_video_info_doc, reference_ad_segments_player_shape
-    doc = load_video_info_doc(video_info_path)
-    return reference_ad_segments_player_shape(doc)  # already {start, end, label, kind, source}
+    """Robust loader for both old and new formats."""
+    try:
+        from schemas.video_info import load_video_info_doc
+        doc = load_video_info_doc(video_info_path)
+        
+        if hasattr(doc, 'timeline_segments') and doc.timeline_segments:
+            # New format
+            ads = []
+            for seg in doc.timeline_segments:
+                if getattr(seg, 'type', None) == 'ad':
+                    ads.append({
+                        "start": float(seg.final_video_start_seconds),
+                        "end": float(seg.final_video_end_seconds),
+                        "label": "Advertisement",
+                        "kind": "non-content"
+                    })
+            return ads
+    except Exception:
+        pass
+
+    # Fallback: try old schema
+    try:
+        from schemas.video_info import reference_ad_segments_player_shape
+        doc = load_video_info_doc(video_info_path)  # try again
+        return reference_ad_segments_player_shape(doc)
+    except Exception as e:
+        print(f"  Warning: Could not parse {video_info_path}: {e}")
+        return []
 
 
 def _load_predicted_ads(segments_path: Path) -> list[dict]:

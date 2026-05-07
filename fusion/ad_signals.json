@@ -18,14 +18,14 @@
       "tropicana", "minute maid", "simply orange", "naked juice",
       "yoplait", "chobani", "fage", "activia",
       "hellmann's", "hellmans", "kraft", "heinz", "kellogg's", "kelloggs",
-      "general mills", "quaker", "campbells", "campbell's"
+      "general mills", "quaker", "campbells", "campbell's", "frank's red hot"
     ],
     "tech_electronics": [
       "apple", "iphone", "ipad", "macbook", "airpods",
       "samsung", "samsung galaxy", "galaxy s", "galaxy z",
       "google", "google pixel", "pixel phone", "google home",
       "microsoft", "surface", "xbox", "windows",
-      "sony", "playstation", "ps5", "ps4",
+      "sony", "playstation", "ps5", "ps4", "bosch",
       "nvidia", "intel", "amd", "qualcomm",
       "lg", "lenovo", "dell", "hp", "asus", "acer", "razer",
       "amazon", "amazon echo", "alexa", "amazon fire", "kindle",
@@ -109,7 +109,7 @@
       "directv", "starlink"
     ],
     "subscription_lifestyle": [
-      "hello fresh", "hellofresh", "factor", "blue apron", "sunbasket",
+      "hello fresh", "hellofresh", "factor", "blue apron", "sunbasket", "instacart",
       "daily harvest", "home chef",
       "dollar shave club", "manscaped", "native",
       "stitch fix", "trunk club", "bombas", "quip",
