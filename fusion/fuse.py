@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from fusion.outro_detector import find_outro_start_time
 from schemas.modality import AnalysisBundle, AudioWindow, SpeechSpan, VisualWindow
 
 # ---------------------------------------------------------------------------
@@ -1754,20 +1755,6 @@ _OPENING_TITLE_TERMS = [
     "prize",
 ]
 
-_ENDING_TITLE_TERMS = [
-    "thanks for watching",
-    "thank you",
-    "credits",
-    "directed by",
-    "produced by",
-    "executive producer",
-    "copyright",
-    "all rights reserved",
-    "www.",
-    ".com",
-]
-
-
 def _graphics_ratio(windows: list[VisualWindow], indices: list[int], t0: float, t1: float) -> float:
     selected = [
         windows[index]
@@ -1829,29 +1816,6 @@ def _has_opening_title_signal(
     )
 
 
-def _has_ending_title_signal(
-    t0: float,
-    t1: float,
-    windows: list[VisualWindow],
-    indices: list[int],
-    speech_spans: list[SpeechSpan],
-) -> bool:
-    combined_text = _speech_text_for_range(t0, t1, speech_spans, margin_sec=4.0)
-    ocr_text = _ocr_text_for_range(t0, t1, speech_spans, margin_sec=4.0)
-    visual_title_ratio = _graphics_ratio(windows, indices, t0, t1)
-    _, semantic_outro_score = _semantic_structure_scores_for_range(t0, t1, speech_spans, margin_sec=8.0)
-    text_hit = (
-        any(term in combined_text for term in _ENDING_TITLE_TERMS)
-        or _contains_phrase(combined_text, _OUTRO_PHRASES)
-    )
-    semantic_hit = semantic_outro_score >= 0.62 and (
-        text_hit
-        or bool(ocr_text)
-        or visual_title_ratio >= 0.30
-    )
-    return text_hit or (bool(ocr_text) and visual_title_ratio >= 0.30) or semantic_hit
-
-
 def _edge_intro_end_time(
     windows: list[VisualWindow],
     run_indices: list[int],
@@ -1876,36 +1840,6 @@ def _edge_intro_end_time(
     short_title_end = min(run_start + EDGE_TITLE_CARD_SEC, run_end)
     if _has_opening_title_signal(run_start, short_title_end, windows, run_indices, speech_spans):
         return short_title_end
-    return None
-
-
-def _edge_outro_start_time(
-    windows: list[VisualWindow],
-    run_indices: list[int],
-    duration: float,
-    speech_spans: list[SpeechSpan],
-    outro_used: bool,
-) -> float | None:
-    if outro_used or not run_indices:
-        return None
-    run_start = windows[run_indices[0]].t0
-    run_end = windows[run_indices[-1]].t1
-    if duration - run_end > 2.0:
-        return None
-
-    asr_spans = _asr_spans_in_range(run_start, run_end, speech_spans)
-    last_asr_end = max((span.t1 for span in asr_spans), default=None)
-    if last_asr_end is None:
-        tail_start = max(run_start, run_end - EDGE_TITLE_CARD_SEC)
-        if _has_ending_title_signal(tail_start, run_end, windows, run_indices, speech_spans):
-            return tail_start
-        return None
-
-    if run_end - last_asr_end < ENDING_SEQUENCE_MIN_SEC:
-        return None
-    tail_start = max(last_asr_end, run_start)
-    if _has_ending_title_signal(tail_start, run_end, windows, run_indices, speech_spans):
-        return tail_start
     return None
 
 
@@ -1991,7 +1925,16 @@ def _build_non_ad_segments(
             if windows[index].t0 < intro_end:
                 labels[position] = LABEL_INTRO
 
-    outro_start = _edge_outro_start_time(windows, run_indices, duration, speech_spans, outro_used)
+    outro_start = find_outro_start_time(
+        windows,
+        run_indices,
+        duration,
+        speech_spans,
+        outro_used=outro_used,
+        outro_phrases=_OUTRO_PHRASES,
+        edge_title_card_sec=EDGE_TITLE_CARD_SEC,
+        ending_sequence_min_sec=ENDING_SEQUENCE_MIN_SEC,
+    )
     if outro_start is not None:
         for position, index in enumerate(run_indices):
             if windows[index].t1 > outro_start:
