@@ -146,8 +146,17 @@ def main(argv: list[str] | None = None) -> int:
         prog="python scripts/run_pipeline.py",
         description="Run visual + audio + speech + fusion end-to-end on a video.",
     )
-    parser.add_argument("video", type=Path, nargs="?", help="Input video file (.mp4 / .mov / ...).")
-    parser.add_argument("--input-dir", type=Path, help="Process all videos in the specified directory.")
+    parser.add_argument(
+        "video",
+        type=Path,
+        nargs="?",
+        help="Input video file (.mp4 / .mov / ...). Omit when using --input-dir.",
+    )
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        help="Process all video files in a directory instead of a single file.",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("data/output"))
     parser.add_argument("--skip-analysis", action="store_true")
     parser.add_argument(
@@ -167,102 +176,63 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--window-sec", type=float, default=2.0)
     parser.add_argument("--audio-window-sec", type=float, default=1.0)
     parser.add_argument("--min-segment-sec", type=float, default=20.0)
-    parser.add_argument("--ocr", action="store_true", help="Run OCR on frames for brand/logo detection")
+    parser.add_argument(
+        "--skip-analysis",
+        action="store_true",
+        help="Skip visual analysis and use existing analysis bundle in the output dir.",
+    )
     args = parser.parse_args(argv)
 
-    # Determine which videos to process
-    if args.input_dir:
-        videos_dir = args.input_dir.expanduser().resolve()
-        if not videos_dir.is_dir():
-            print(f"Error: videos directory not found: {videos_dir}", file=sys.stderr)
-            return 2
-        # Find all video files (common video formats)
-        video_files = sorted(set(
-            v for ext in ["*.mp4", "*.mov", "*.avi", "*.mkv"]
-            for v in videos_dir.glob(ext)
-            if v.is_file()
-        ))
-        if not video_files:
-            print(f"Error: no video files found in {videos_dir}", file=sys.stderr)
-            return 2
-        videos_to_process = video_files
-    else:
-        if args.video is None:
-            parser.print_help()
-            print(f"\nError: either provide a video file or use --input-dir", file=sys.stderr)
-            return 2
-        video = args.video.expanduser().resolve(strict=False)
+    def _process_single(video_path: Path) -> int:
+        video = video_path.expanduser().resolve(strict=False)
         if not video.is_file():
             print(f"Error: video not found: {video}", file=sys.stderr)
             return 2
-        videos_to_process = [video]
 
-    out_dir = args.out_dir.expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Process each video
-    return_code = 0
-    for video_idx, video in enumerate(videos_to_process, 1):
-        print(f"\n{'='*60}")
-        print(f"Processing video {video_idx}/{len(videos_to_process)}: {video.name}")
-        print(f"{'='*60}")
-
-        bundle_path, segments_path = _bundle_and_segments_paths(video, out_dir)
+        out_dir = args.out_dir.expanduser().resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        bundle_path = out_dir / f"{video.stem}_analysis_bundle.json"
+        segments_path = out_dir / f"{video.stem}_segments.json"
 
         print(f"Pipeline: {video.name}")
         print(f"  Bundle  -> {bundle_path}")
         print(f"  Segments-> {segments_path}")
 
-        has_existing_bundle = bundle_path.is_file()
-
-        if args.skip_analysis:
-            if not has_existing_bundle:
-                print(f"Error: analysis bundle not found: {bundle_path}", file=sys.stderr)
-                return_code = 2
-                continue
-            reuse_bundle = True
-        elif has_existing_bundle and not args.force_analysis:
-            reuse_bundle = True
-        else:
-            reuse_bundle = False
-
-        total_steps = 1 if reuse_bundle else 1 + (0 if args.skip_audio else 1) + (1 if args.ocr else 0) + 1
+        total_steps = (0 if args.skip_analysis else 1) + (0 if args.skip_audio else 1) + 1
         step = 0
 
-        if not reuse_bundle:
+        if not args.skip_analysis:
             step += 1
             t0 = time.monotonic()
             _print_step(step, total_steps, "Visual analysis")
             _run_visual(video, bundle_path, args.sample_fps, args.window_sec)
             print(f"     Took {time.monotonic() - t0:.1f}s")
-
-            if args.ocr:
-                step += 1
-                t0 = time.monotonic()
-                _print_step(step, total_steps, "OCR analysis")
-                _run_ocr(video, bundle_path)
-                print(f"     Took {time.monotonic() - t0:.1f}s")
-
-            if not args.skip_audio:
-                step += 1
-                t0 = time.monotonic()
-                _print_step(
-                    step,
-                    total_steps,
-                    "Audio analysis" + ("" if args.skip_speech else " + speech"),
-                )   
-                _run_audio(
-                    video,
-                    bundle_path,
-                    window_sec=args.audio_window_sec,
-                    with_speech=not args.skip_speech,
-                    model_name=args.model,
-                    vad=args.vad,
-                    language=args.language,
-                )
-                print(f"     Took {time.monotonic() - t0:.1f}s")
         else:
-            print("  Reusing existing analysis bundle")
+            step += 1
+            _print_step(step, total_steps, "Skip visual analysis — using existing bundle")
+            if not bundle_path.is_file():
+                print(f"Error: analysis bundle not found: {bundle_path}", file=sys.stderr)
+                return 3
+            print(f"     Using bundle -> {bundle_path}")
+
+        if not args.skip_audio:
+            step += 1
+            t0 = time.monotonic()
+            _print_step(
+                step,
+                total_steps,
+                "Audio analysis" + ("" if args.skip_speech else " + speech"),
+            )
+            _run_audio(
+                video,
+                bundle_path,
+                window_sec=args.audio_window_sec,
+                with_speech=not args.skip_speech,
+                model_name=args.model,
+                vad=args.vad,
+                language=args.language,
+            )
+            print(f"     Took {time.monotonic() - t0:.1f}s")
 
         step += 1
         t0 = time.monotonic()
@@ -271,15 +241,40 @@ def main(argv: list[str] | None = None) -> int:
         print(f"     Took {time.monotonic() - t0:.1f}s")
 
         print()
-        print(f"Done with {video.name}")
+        print(f"Done for {video.name}. Launch the player with:")
+        print(f"  PYTHONPATH=. python -m player.player")
+        print(f"  (open '{video}' in the file dialog; segments load from {segments_path.name})")
+        return 0
 
-    print(f"\n{'='*60}")
-    print(f"All videos processed.")
-    print(f"{'='*60}")
-    print(f"To launch the player with:")
-    print(f"  PYTHONPATH=. python -m player.player")
-    print(f"  (open any video file in the file dialog; segments load from data/output/)")
-    return return_code
+    # decide between single video or directory processing
+    if args.input_dir and args.video:
+        print("Error: provide either a single video or --input-dir, not both", file=sys.stderr)
+        return 4
+
+    if args.input_dir:
+        input_dir = args.input_dir.expanduser().resolve(strict=False)
+        if not input_dir.is_dir():
+            print(f"Error: input directory not found: {input_dir}", file=sys.stderr)
+            return 5
+
+        video_exts = {".mp4", ".mov", ".mkv", ".avi"}
+        videos = sorted([p for p in input_dir.iterdir() if p.suffix.lower() in video_exts and p.is_file()])
+        if not videos:
+            print(f"No video files found in: {input_dir}", file=sys.stderr)
+            return 6
+
+        overall_failed = 0
+        for vid in videos:
+            rc = _process_single(vid)
+            if rc != 0:
+                overall_failed = 1
+        return overall_failed
+
+    if not args.video:
+        print("Error: no input specified. Provide a video path or --input-dir.", file=sys.stderr)
+        return 1
+
+    return _process_single(args.video)
 
 
 if __name__ == "__main__":

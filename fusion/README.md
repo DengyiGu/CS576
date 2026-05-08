@@ -1,5 +1,4 @@
 Fusion Module
-Owner: Leena
 
 This module is the orchestration and fusion layer for the multimodal segmentation
 pipeline. It consumes the visual, audio, and speech outputs and produces the
@@ -38,11 +37,9 @@ What the pipeline writes
 ------------------------
 The pipeline writes per-video outputs into `data/output/`:
 
-    <stem>_analysis_bundle.json
-    <stem>_segments.json
+Expected runtime per video: 10-20 minutes depending on length.
 
-The player loads the segments automatically when a matching file exists in
-`data/output/`.
+Current Evaluation Results
 
 Fusion CLI
 ----------
@@ -92,8 +89,17 @@ The fusion output uses the player taxonomy and writes JSON in this shape:
         ]
     }
 
-Valid labels:
-
+Valid labels (must match player TAXONOMY exactly):
     Content:     Core Content
-    Non-content: Intro, Outro, Advertisement
-    
+    Non-content: Intro, Outro, Advertisement, Self-Promotion, Recap,
+                 Transition, Inactivity, Filler
+
+
+Notes
+- Always run with conda activate cs576 first, otherwise speech recognition will be skipped.
+- The cs576 environment requires Python 3.10+. The base anaconda environment (Python 3.8)
+  is not compatible with faster-whisper.
+- To skip speech recognition for a faster run, add --skip-speech to the fusion command.
+- visual/analyze.py has a bug fix applied (histogram shape mismatch). If you pull a newer
+  version of analyze.py from a teammate, make sure it includes the _HIST_SIZE fix or
+  the pipeline will crash.
