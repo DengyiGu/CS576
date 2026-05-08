@@ -20,23 +20,27 @@ _KIND_FOR_LABEL: dict[str, str] = {
     LABEL_ADVERTISEMENT: KIND_NON_CONTENT,
 }
 
-# Hyper-parameters
-# Hyper-parameters - tuned for this project style
+# ---------------------------------------------------------------------------
+# Hyper‑parameters – tuned for vlog‑style “Day in the life” content
+# ---------------------------------------------------------------------------
 AD_MIN_SEC = 28.0
 AD_MAX_SEC = 60.0
-GAP_MIN_SEC = 190.0        # Stronger separation between ads
-FIRST_AD_MIN_START_SEC = 50.0
+GAP_MIN_SEC = 190.0          # minimum gap between consecutive ads
+FIRST_AD_MIN_START_SEC = 50.0 # ads cannot start earlier than this
 
-W_AUDIO = 1.50
-W_VISUAL_SEMANTIC = 0.95
+W_AUDIO = 1.50               # audio anomaly weight
+W_VISUAL_SEMANTIC = 1.20     # visual graphics weight (increased to capture ad UI)
 
-SMOOTH_HALF_WIN = 7
-SPEECH_CONTEXT_SEC = 18.0
+SMOOTH_HALF_WIN = 9          # smoothing radius (windows)
 
-EDGE_WEIGHT = 2.5
-INTERIOR_WEIGHT = 1.0
+SPEECH_CONTEXT_SEC = 18.0    # look‑ahead for speech coverage
 
-# Ad-signal phrase/brand loading
+EDGE_WEIGHT = 5.0            # heavily favour strong boundaries (was 2.5)
+INTERIOR_WEIGHT = 1.0        # keep interior contribution moderate
+
+# ---------------------------------------------------------------------------
+# Ad‑signal phrase / brand loading
+# ---------------------------------------------------------------------------
 def _load_ad_signals() -> tuple[list[str], dict[str, list[str]]]:
     signals_file = Path(__file__).parent / "ad_signals.json"
     if not signals_file.is_file():
@@ -58,7 +62,10 @@ _OUTRO_PHRASES = _AD_PHRASES.get("outro", [])
 _INTRO_PHRASES = _AD_PHRASES.get("intro", [])
 _RECAP_PHRASES = _AD_PHRASES.get("recap", [])
 
-# Per-window audio helpers
+
+# ===================================================================
+# Per‑window audio helpers
+# ===================================================================
 def _audio_features(
     t0: float, t1: float, audio_windows: list[AudioWindow]
 ) -> tuple[float, float]:
@@ -148,7 +155,10 @@ def _visual_semantic_ad_score(w: VisualWindow) -> float:
         score += 0.20 * min(1.0, (float(w.edge_density) - 0.45) / 0.35)
     return min(1.0, score)
 
-# Step 1 – per-window foreignness score
+
+# ===================================================================
+# Step 1 – per‑window foreignness score
+# ===================================================================
 def _compute_foreignness_scores(
     windows: list[VisualWindow],
     audio_windows: list[AudioWindow],
@@ -181,7 +191,7 @@ def _compute_foreignness_scores(
         if text_sig > 0:
             audio_score = max(audio_score, text_sig)
 
-        # Tighter intro/outro protection
+        # dampen intro/outro regions to avoid false positives
         if mid < duration * 0.055 or mid > duration * 0.94:
             visual_semantic *= 0.25
             audio_score *= 0.25
@@ -194,7 +204,10 @@ def _compute_foreignness_scores(
         )
     return scores
 
-# Step 2 – per-boundary edge score
+
+# ===================================================================
+# Step 2 – per‑boundary edge score
+# ===================================================================
 def _compute_edge_scores(
     windows: list[VisualWindow],
     audio_windows: list[AudioWindow],
@@ -216,6 +229,7 @@ def _compute_edge_scores(
         has = _has_nearby_speech(t_boundary, t_boundary + 12.0, speech_spans, 3.0)
         speech_transition = 1.0 if (had != has) else 0.0
 
+        # dampen intro/outro edges
         if t_boundary < duration * 0.06 or t_boundary > duration * 0.93:
             vis *= 0.20
             scene_cut *= 0.20
@@ -238,7 +252,9 @@ def _smooth(scores: np.ndarray, half_win: int) -> np.ndarray:
     return out
 
 
-# Generalized DP for any number of ads
+# ===================================================================
+# Step 3 – Dynamic‑programming ad placement (generalised)
+# ===================================================================
 def _find_best_ads(
     edge_scores: np.ndarray,
     foreign_scores: np.ndarray,
@@ -273,10 +289,8 @@ def _find_best_ads(
             break
 
     NEG_INF = float("-inf")
-
-    # DP tables: best score ending at position i with exactly k ads
     dp = np.full((N + 1, max_ads + 1), NEG_INF, dtype=np.float64)
-    prev = np.full((N + 1, max_ads + 1, 2), -1, dtype=np.int32)  # (start, prev_end)
+    prev = np.full((N + 1, max_ads + 1, 2), -1, dtype=np.int32)
 
     dp[0, 0] = 0.0
 
@@ -296,12 +310,12 @@ def _find_best_ads(
                 break
             sc = interval_score(s, e)
 
-            # 1 ad case
+            # 1‑ad case
             if sc > dp[e, 1]:
                 dp[e, 1] = sc
                 prev[e, 1] = [s, -1]
 
-            # k ads case (k >= 2)
+            # k‑ads case (k >= 2)
             for k in range(2, max_ads + 1):
                 me = s - gap_w
                 if me < 0:
@@ -327,7 +341,6 @@ def _find_best_ads(
     if best_total <= NEG_INF:
         return []
 
-    # Reconstruct
     intervals: list[tuple[int, int]] = []
     current_e = best_end
     current_k = best_k
@@ -341,107 +354,16 @@ def _find_best_ads(
     return intervals
 
 
-# Step 4 – Refine boundaries
-def _refine_boundary(
+# ===================================================================
+# Boundary snapping (ad‑boundary refinement + intro/outro)
+# ===================================================================
+def _snap_boundary_to_shot(
+    windows: list[VisualWindow],
     idx: int,
-    edge_scores: np.ndarray,
     direction: str,
-    windows: list[VisualWindow],
-    search_sec: float = 15.0,
+    search_sec: float = 8.0,
 ) -> int:
-    N = len(windows)
-    window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
-    search_w = max(1, int(search_sec / window_sec))
-    if direction == "start":
-        lo = max(0, idx - search_w // 2)
-        hi = min(N, idx + search_w)
-    else:
-        lo = max(0, idx - search_w)
-        hi = min(N, idx + search_w // 2 + 1)
-    if lo >= hi:
-        return idx
-    best_i = lo + int(np.argmax(edge_scores[lo:hi]))
-    return best_i
-
-# Segment building
-def _make_segment_dict(label: str, start: float, end: float) -> dict[str, Any]:
-    return {
-        "start": round(start, 3),
-        "end": round(end, 3),
-        "label": label,
-        "kind": _KIND_FOR_LABEL.get(label, KIND_NON_CONTENT),
-    }
-
-
-def _label_content_run(
-    windows: list[VisualWindow],
-    run_indices: list[int],
-    is_before_first_ad: bool,
-    is_after_last_ad: bool,
-    intro_used: bool,
-    outro_used: bool,
-) -> tuple[str, bool, bool]:
-    if not run_indices:
-        return LABEL_CORE_CONTENT, intro_used, outro_used
-    if is_before_first_ad and not intro_used:
-        return LABEL_INTRO, True, outro_used
-    if is_after_last_ad and not outro_used:
-        return LABEL_OUTRO, intro_used, True
-    return LABEL_CORE_CONTENT, intro_used, outro_used
-
-
-def _detect_intro_end(windows: list[VisualWindow], min_start: float = 10.0, max_end: float = 120.0) -> float | None:
-    """Find intro end by detecting the first long static/freeze run after min_start.
-    A sudden high palette_delta with static hypothesis signals a title card / freeze
-    that typically marks the end of an organic intro."""
-    # Look for consecutive static windows with high palette_delta — these are freeze/end-card transitions
-    i = 0
-    while i < len(windows):
-        w = windows[i]
-        if w.t0 < min_start:
-            i += 1
-            continue
-        if w.t0 > max_end:
-            break
-        if w.visual_hypothesis == "static" and float(w.palette_delta) > 0.9:
-            # found start of a static run — return the start of that window as intro end
-            return float(w.t0)
-        i += 1
-    return None
-
-
-def _detect_outro_start(windows: list[VisualWindow], min_static_dur: float = 12.0, min_start_frac: float = 0.8, duration: float = 0.0) -> float | None:
-    """Find outro start by detecting the last long run of static windows near video end.
-    End-cards / title sequences are consistently static with palette_delta=1.0."""
-    min_start = duration * min_start_frac if duration > 0 else 0.0
-
-    # Scan from end for the earliest start of the final continuous static block
-    # that is long enough to be an outro
-    best_start: float | None = None
-    i = len(windows) - 1
-    while i >= 0:
-        w = windows[i]
-        if w.t0 < min_start:
-            break
-        if w.visual_hypothesis == "static" and float(w.palette_delta) > 0.9:
-            # extend backwards
-            run_end_t = windows[i].t1
-            j = i
-            while j >= 0 and windows[j].visual_hypothesis == "static" and float(windows[j].palette_delta) > 0.9:
-                j -= 1
-            run_start_t = windows[j + 1].t0
-            run_dur = run_end_t - run_start_t
-            if run_dur >= min_static_dur:
-                best_start = run_start_t
-            i = j
-        else:
-            i -= 1
-
-    return best_start
-
-
-def _snap_boundary_to_shot(windows: list[VisualWindow], idx: int, direction: str, search_sec: float = 6.0) -> int:
-    """Snap an ad boundary index to the nearest strong shot-boundary window."""
+    """Snap a boundary index to the nearest strong shot‑boundary window."""
     N = len(windows)
     window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
     half_w = max(1, int(search_sec / window_sec))
@@ -466,6 +388,74 @@ def _snap_boundary_to_shot(windows: list[VisualWindow], idx: int, direction: str
     return best_i
 
 
+# ===================================================================
+# Intro / Outro detection (visual freeze‑frame / static analysis)
+# ===================================================================
+def _detect_intro_end(
+    windows: list[VisualWindow],
+    min_start: float = 10.0,
+    max_end: float = 120.0,
+) -> float | None:
+    """Find intro end by locating the first long static/freeze run after `min_start`."""
+    i = 0
+    while i < len(windows):
+        w = windows[i]
+        if w.t0 < min_start:
+            i += 1
+            continue
+        if w.t0 > max_end:
+            break
+        if w.visual_hypothesis == "static" and float(w.palette_delta) > 0.9:
+            return float(w.t0)
+        i += 1
+    return None
+
+
+def _detect_outro_start(
+    windows: list[VisualWindow],
+    min_static_dur: float = 12.0,
+    min_start_frac: float = 0.85,
+    duration: float = 0.0,
+) -> float | None:
+    """Detect outro start by finding the last long static block near the end."""
+    if duration <= 0:
+        return None
+    min_start = duration * min_start_frac
+
+    best_start: float | None = None
+    i = len(windows) - 1
+    while i >= 0:
+        w = windows[i]
+        if w.t0 < min_start:
+            break
+        if w.visual_hypothesis == "static" and float(w.palette_delta) > 0.9:
+            run_end_t = w.t1
+            j = i
+            while j >= 0 and windows[j].visual_hypothesis == "static" and float(windows[j].palette_delta) > 0.9:
+                j -= 1
+            run_start_t = windows[j + 1].t0
+            run_dur = run_end_t - run_start_t
+            if run_dur >= min_static_dur:
+                best_start = run_start_t
+            i = j
+        else:
+            i -= 1
+
+    return best_start
+
+
+# ===================================================================
+# Segment building
+# ===================================================================
+def _make_segment_dict(label: str, start: float, end: float) -> dict[str, Any]:
+    return {
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "label": label,
+        "kind": _KIND_FOR_LABEL.get(label, KIND_NON_CONTENT),
+    }
+
+
 def _build_segments_from_ad_intervals(
     ad_intervals: list[tuple[int, int]],
     windows: list[VisualWindow],
@@ -475,17 +465,17 @@ def _build_segments_from_ad_intervals(
 ) -> list[dict[str, Any]]:
     N = len(windows)
 
-    # Detect intro end and outro start from visual signal if not provided
+    # Detect intro/outro boundaries using visual cues
     if intro_end_sec is None:
         intro_end_sec = _detect_intro_end(windows, min_start=10.0, max_end=120.0)
     if outro_start_sec is None:
         outro_start_sec = _detect_outro_start(windows, min_static_dur=12.0, min_start_frac=0.85, duration=duration)
 
-    # Snap ad boundaries to nearest strong shot cut
+    # Snap ad boundaries to strong shot cuts
     snapped: list[tuple[int, int]] = []
     for s, e in ad_intervals:
-        rs = _snap_boundary_to_shot(windows, s, "start", search_sec=6.0)
-        re = _snap_boundary_to_shot(windows, e - 1, "end", search_sec=6.0) + 1
+        rs = _snap_boundary_to_shot(windows, s, "start", search_sec=8.0)
+        re = _snap_boundary_to_shot(windows, e - 1, "end", search_sec=8.0) + 1
         window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
         min_w = max(1, int(AD_MIN_SEC / window_sec))
         if re - rs < min_w:
@@ -512,70 +502,78 @@ def _build_segments_from_ad_intervals(
             i = j
             continue
 
+        # Non‑ad run
         j = i
         while j < N and not is_ad[j]:
             j += 1
         run_start = windows[i].t0
         run_end = windows[j - 1].t1
 
-        # Use detected intro/outro boundaries
-        if intro_end_sec is not None and run_start < intro_end_sec:
-            label = LABEL_INTRO
-        elif outro_start_sec is not None and run_end > outro_start_sec:
-            label = LABEL_OUTRO
-        else:
-            label = LABEL_CORE_CONTENT
+        # Split the run if it crosses an intro / outro boundary
+        split_points: list[float] = []
+        # Intro split (only for the very first non‑ad run)
+        if i == 0 and intro_end_sec is not None and run_start < intro_end_sec < run_end:
+            split_points.append(intro_end_sec)
+        # Outro split (only for the very last non‑ad run)
+        if j == N and outro_start_sec is not None and run_start < outro_start_sec < run_end:
+            split_points.append(outro_start_sec)
 
-        segments.append(_make_segment_dict(label, run_start, run_end))
+        if split_points:
+            split_points.sort()
+            prev_bound = run_start
+            for sp in split_points:
+                # snap this extra split to a nearby shot for accuracy
+                idx_sp = 0
+                for k, w in enumerate(windows):
+                    if w.t0 <= sp < w.t1:
+                        idx_sp = k
+                        break
+                idx_sp = _snap_boundary_to_shot(windows, idx_sp, "end", search_sec=4.0)
+                sp_snapped = windows[idx_sp].t1
+                if sp_snapped > prev_bound:
+                    # determine label for this sub‑run
+                    if i == 0 and sp == intro_end_sec:
+                        label = LABEL_INTRO
+                    elif j == N and sp == outro_start_sec:
+                        label = LABEL_CORE_CONTENT
+                    else:
+                        label = LABEL_CORE_CONTENT
+                    segments.append(_make_segment_dict(label, prev_bound, sp_snapped))
+                    prev_bound = sp_snapped
+            # Remaining part
+            if prev_bound < run_end:
+                # last part: if it's after outro split, label outro; else core content
+                if j == N and outro_start_sec is not None and prev_bound >= outro_start_sec:
+                    label = LABEL_OUTRO
+                elif i == 0:
+                    label = LABEL_CORE_CONTENT  # already consumed intro
+                else:
+                    label = LABEL_CORE_CONTENT
+                segments.append(_make_segment_dict(label, prev_bound, run_end))
+        else:
+            # No split – label whole run
+            if i == 0:
+                label = LABEL_INTRO
+            elif j == N:
+                label = LABEL_OUTRO
+            else:
+                label = LABEL_CORE_CONTENT
+            segments.append(_make_segment_dict(label, run_start, run_end))
+
         i = j
 
     segments.sort(key=lambda s: s["start"])
     return segments
 
 
-def _smooth_labels(
-    labels: list[str],
-    windows: list[VisualWindow],
-    min_segment_seconds: float = 12.0,
-) -> list[str]:
-    if not labels:
-        return labels
-    result = list(labels)
-    def _dur(start: int, lbl: str) -> float:
-        total = 0.0
-        k = start
-        while k < len(result) and result[k] == lbl:
-            total += windows[k].t1 - windows[k].t0
-            k += 1
-        return total
-    i = 0
-    while i < len(result):
-        if _dur(i, result[i]) < min_segment_seconds and i > 0:
-            prev = result[i - 1]
-            j = i
-            while j < len(result) and result[j] == result[i]:
-                result[j] = prev
-                j += 1
-        i += 1
-    i = len(result) - 1
-    while i >= 0:
-        rs = i
-        while rs > 0 and result[rs - 1] == result[i]:
-            rs -= 1
-        run_dur = sum(windows[k].t1 - windows[k].t0 for k in range(rs, i + 1))
-        if run_dur < min_segment_seconds and i < len(result) - 1:
-            nxt = result[i + 1]
-            for k in range(rs, i + 1):
-                result[k] = nxt
-        i = rs - 1
-    return result
-
+# ===================================================================
 # Public API
+# ===================================================================
 def fuse_bundle_to_segments(
     bundle: AnalysisBundle,
     *,
     min_segment_seconds: float = 12.0,
-    enforce_three_ads: bool = True,
+    enforce_three_ads: bool = True,    # kept for API compatibility, not used now
     intro_end_sec: float | None = None,
     outro_start_sec: float | None = None,
 ) -> list[dict[str, Any]]:
@@ -594,7 +592,6 @@ def fuse_bundle_to_segments(
     )
     smooth_edge = _smooth(raw_edge, SMOOTH_HALF_WIN)
 
-    # Use generalized version (max 6 ads is more than enough for typical content)
     ad_intervals = _find_best_ads(smooth_edge, smooth_foreign, windows, max_ads=6)
 
     if ad_intervals:
