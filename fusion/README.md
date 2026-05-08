@@ -125,3 +125,35 @@ Notes
 - visual/analyze.py has a bug fix applied (histogram shape mismatch). If you pull a newer
   version of analyze.py from a teammate, make sure it includes the _HIST_SIZE fix or
   the pipeline will crash.
+
+
+Known Limitations
+
+The pipeline is calibrated for traditional YouTube content with clearly-inserted
+~30-60s ad breaks. It struggles when the input is *out-of-distribution*:
+
+* No "zero ads" branch.  `_find_best_ads` picks K from 1..max_ads (default 6)
+  by score and always returns the highest-scoring K, regardless of absolute
+  confidence.  On videos with no real ads it will still emit up to 6 false
+  positives.
+
+* Branded-but-not-ad content trips the OCR / visual heuristic.  Test_002 is
+  a NASA Apollo livestream — every NASA logo, mission overlay, and
+  splashdown title card flags as "graphics_heavy / high text density" and
+  the OCR spans surface "NASA NASA NASA" which the brand-text heuristic
+  treats as ad evidence.  Result: 6 false-positive ads on a no-ad video.
+
+* The semantic structure module's "outro" prompt set matches conclusion-like
+  livestream language (mission wrap-ups, post-event commentary).  On the
+  same NASA stream it labeled most of the middle of the video with
+  outro_score >= 0.6.
+
+If you need to run on this kind of content, plausible mitigations (not yet
+implemented):
+  - Add a confidence floor in `_find_best_ads` so K=0 is allowed when no
+    interval clears a minimum normalized foreignness.
+  - Maintain an allowlist of "official-broadcast" brands (NASA, BBC, NHK,
+    etc.) whose OCR/text matches should *not* contribute to ad evidence.
+  - Tighten `_visual_semantic_ad_score` saturation gating: when >90% of
+    windows look "graphics_heavy", treat that as a signal of pervasive
+    overlays (broadcast graphics) rather than ad evidence.
