@@ -29,6 +29,11 @@ FIRST_AD_MIN_START_SEC = 50.0
 
 W_AUDIO = 1.50
 W_VISUAL_SEMANTIC = 0.95
+# Weight on the optional MiniLM semantic ad score (--with-semantic).  Note that
+# DP normalizes foreignness by its global max, so this weight only nudges the
+# *relative* ranking of windows — it does not by itself shift interval picks
+# very far.  The bigger lever is the post-DP snap below.  Set to 0.0 to disable.
+W_SEMANTIC_AD = 0.85
 
 SMOOTH_HALF_WIN = 7
 SPEECH_CONTEXT_SEC = 18.0
@@ -148,6 +153,179 @@ def _visual_semantic_ad_score(w: VisualWindow) -> float:
         score += 0.20 * min(1.0, (float(w.edge_density) - 0.45) / 0.35)
     return min(1.0, score)
 
+
+# Quality filters for semantic ad spans before they contribute to foreignness.
+#  * span length <= MAX_SEC: longer spans tend to be intro/outro narration that
+#    Whisper merged into one segment; their topic-level cosine sim against the
+#    ad prompt set is noisy and often fires on day-in-the-life monologue.
+#  * margin >= MIN_MARGIN: how much higher the ad-prompt cosine is vs the
+#    content-prompt cosine.  Below ~0.10 the model is hedging and false
+#    positives dominate.
+_SEM_AD_MAX_SPAN_SEC = 70.0
+_SEM_AD_MIN_MARGIN = 0.10
+
+
+def _semantic_ad_score_window(
+    t0: float, t1: float, speech_spans: list[SpeechSpan]
+) -> float:
+    """Max ``semantic_ad_score`` over speech_spans with ``source="semantic"``
+    that overlap [t0, t1] AND pass the quality filter.
+
+    Returns 0.0 if no overlapping semantic span (e.g. when ``--with-semantic``
+    was not used).  These spans come from the optional MiniLM scorer in
+    ``semantic/analyze.py``; their score sits in [0, 1] with ~0.58 being the
+    "is_ad" threshold the module itself uses.
+    """
+    if not speech_spans:
+        return 0.0
+    best = 0.0
+    for span in speech_spans:
+        extra = span.model_extra or {}
+        if extra.get("source") != "semantic":
+            continue
+        if span.t1 <= t0 or span.t0 >= t1:
+            continue
+        if (span.t1 - span.t0) > _SEM_AD_MAX_SPAN_SEC:
+            continue
+        if float(extra.get("semantic_margin", 0.0)) < _SEM_AD_MIN_MARGIN:
+            continue
+        score = float(extra.get("semantic_ad_score", 0.0))
+        if score > best:
+            best = score
+    return best
+
+
+def _snap_intervals_to_semantic_spans(
+    ad_intervals: list[tuple[int, int]],
+    windows: list[VisualWindow],
+    speech_spans: list[SpeechSpan],
+) -> list[tuple[int, int]]:
+    """Adjust DP-picked ad intervals to better align with high-confidence
+    semantic ad spans.
+
+    Rationale: ``_find_best_ads`` normalizes foreignness by its global max, so a
+    +0.2 boost in a small region may not move interval boundaries.  Semantic
+    spans (from --with-semantic) capture *which* speech-text actually reads as
+    ad-copy, which is a more direct timing signal than smoothed foreignness.
+
+    We only snap when:
+      * a qualifying semantic span overlaps the DP interval at all
+        (touches, even by 1s; otherwise we trust DP)
+      * the IoU between DP and the semantic span is low (<= 0.45) — i.e. DP
+        is mostly off the semantic evidence
+    The snap replaces the DP interval with the union of (DP, sem), clipped to
+    [AD_MIN_SEC, AD_MAX_SEC] biased toward keeping the semantic-evidence side.
+    """
+    if not ad_intervals or not speech_spans or not windows:
+        return ad_intervals
+
+    qualifying = []
+    for span in speech_spans:
+        extra = span.model_extra or {}
+        if extra.get("source") != "semantic":
+            continue
+        if (span.t1 - span.t0) > _SEM_AD_MAX_SPAN_SEC:
+            continue
+        if float(extra.get("semantic_margin", 0.0)) < _SEM_AD_MIN_MARGIN:
+            continue
+        score = float(extra.get("semantic_ad_score", 0.0))
+        if score < 0.65:
+            continue
+        qualifying.append((span.t0, span.t1, score))
+
+    if not qualifying:
+        return ad_intervals
+
+    def _t_to_idx(t: float) -> int:
+        for k, w in enumerate(windows):
+            if w.t0 <= t < w.t1:
+                return k
+        return max(0, min(len(windows) - 1, len(windows) // 2))
+
+    out: list[tuple[int, int]] = []
+    for s_idx, e_idx in ad_intervals:
+        dp_t0 = windows[s_idx].t0
+        dp_t1 = windows[e_idx - 1].t1 if e_idx > 0 else windows[s_idx].t1
+
+        # Find best overlapping qualifying semantic span (by score).
+        best = None
+        for st, en, sc in qualifying:
+            if en <= dp_t0 or st >= dp_t1:
+                continue
+            if best is None or sc > best[2]:
+                best = (st, en, sc)
+        if best is None:
+            out.append((s_idx, e_idx))
+            continue
+
+        sem_t0, sem_t1, _ = best
+        inter = max(0.0, min(dp_t1, sem_t1) - max(dp_t0, sem_t0))
+        union = max(dp_t1, sem_t1) - min(dp_t0, sem_t0)
+        iou = inter / union if union > 0 else 0.0
+
+        if iou > 0.45:
+            out.append((s_idx, e_idx))
+            continue
+
+        # Build a new interval anchored on the semantic evidence but kept in
+        # bounds.  Prefer the union; if too long, drop the side that is
+        # farther from the semantic span's midpoint.
+        new_t0 = min(dp_t0, sem_t0)
+        new_t1 = max(dp_t1, sem_t1)
+        new_dur = new_t1 - new_t0
+        if new_dur > AD_MAX_SEC:
+            sem_mid = 0.5 * (sem_t0 + sem_t1)
+            half = AD_MAX_SEC / 2.0
+            new_t0 = max(min(dp_t0, sem_t0), sem_mid - half)
+            new_t1 = min(max(dp_t1, sem_t1), sem_mid + half)
+            if new_t1 - new_t0 < AD_MIN_SEC:
+                new_t0 = sem_mid - AD_MAX_SEC / 2.0
+                new_t1 = sem_mid + AD_MAX_SEC / 2.0
+
+        ns = _t_to_idx(new_t0)
+        ne = _t_to_idx(new_t1 - 1e-3) + 1
+        ne = max(ne, ns + 1)
+        # Keep within sane duration band.
+        cur_dur = windows[ne - 1].t1 - windows[ns].t0 if ne > 0 else 0.0
+        if cur_dur < AD_MIN_SEC or cur_dur > AD_MAX_SEC:
+            out.append((s_idx, e_idx))
+        else:
+            out.append((ns, ne))
+
+    # Re-sort and de-overlap (snap may have produced overlaps).
+    out.sort(key=lambda p: p[0])
+    deduped: list[tuple[int, int]] = []
+    for s, e in out:
+        if deduped and s < deduped[-1][1]:
+            ps, pe = deduped[-1]
+            deduped[-1] = (ps, max(pe, e))
+        else:
+            deduped.append((s, e))
+    return deduped
+
+
+def _semantic_structure_window(
+    t0: float, t1: float, speech_spans: list[SpeechSpan]
+) -> tuple[float, float]:
+    """Max (intro_score, outro_score) from overlapping ``source="semantic_structure"`` spans."""
+    if not speech_spans:
+        return 0.0, 0.0
+    best_intro = 0.0
+    best_outro = 0.0
+    for span in speech_spans:
+        extra = span.model_extra or {}
+        if extra.get("source") != "semantic_structure":
+            continue
+        if span.t1 <= t0 or span.t0 >= t1:
+            continue
+        i = float(extra.get("semantic_intro_score", 0.0))
+        o = float(extra.get("semantic_outro_score", 0.0))
+        if i > best_intro:
+            best_intro = i
+        if o > best_outro:
+            best_outro = o
+    return best_intro, best_outro
+
 # Step 1 – per-window foreignness score
 def _compute_foreignness_scores(
     windows: list[VisualWindow],
@@ -172,6 +350,10 @@ def _compute_foreignness_scores(
         nearby = _has_nearby_speech(t0, t1, speech_spans, SPEECH_CONTEXT_SEC)
         text_sig = _speech_text_ad_signal(t0, t1, speech_spans)
 
+        # Optional semantic ad score from semantic/analyze.py (MiniLM).
+        # Only contributes when --with-semantic was run; otherwise it's 0.0.
+        sem_ad = _semantic_ad_score_window(t0, t1, speech_spans)
+
         nospeech_score = 0.0
         if not nearby:
             nospeech_score = 0.95
@@ -186,11 +368,13 @@ def _compute_foreignness_scores(
             visual_semantic *= 0.25
             audio_score *= 0.25
             nospeech_score *= 0.25
+            sem_ad *= 0.25
 
         scores[i] = (
             W_VISUAL_SEMANTIC * visual_semantic
             + W_AUDIO * audio_score
             + 0.60 * nospeech_score
+            + W_SEMANTIC_AD * sem_ad
         )
     return scores
 
@@ -596,6 +780,14 @@ def fuse_bundle_to_segments(
 
     # Use generalized version (max 6 ads is more than enough for typical content)
     ad_intervals = _find_best_ads(smooth_edge, smooth_foreign, windows, max_ads=6)
+
+    # Post-DP snap to high-confidence semantic ad spans (when --with-semantic
+    # was run).  See _snap_intervals_to_semantic_spans for rationale; this is
+    # a no-op when no overlapping qualifying semantic span exists.
+    if ad_intervals and bundle.speech_spans:
+        ad_intervals = _snap_intervals_to_semantic_spans(
+            ad_intervals, windows, bundle.speech_spans
+        )
 
     if ad_intervals:
         return _build_segments_from_ad_intervals(
