@@ -28,6 +28,8 @@ def build_ocr_spans(
     allow_download: bool = False,
     gpu: bool = False,
     min_confidence: float = 0.35,
+    candidate_dedup_sec: float = 0.0,
+    add_sweep_when_candidates: bool = True,
 ) -> list[SpeechSpan]:
     try:
         import cv2
@@ -70,14 +72,27 @@ def build_ocr_spans(
                     break
         else:
             sample_times = sorted({round(float(t), 3) for t in candidate_times if float(t) >= 0.0})
-            if duration > 0.0:
-                # Add a sparse global sweep so short brand/logo text is not
-                # missed just because the visual pre-filter skipped that frame.
+            # Sparse global sweep so short brand/logo text isn't missed when
+            # the visual pre-filter happened to skip that exact frame.  On by
+            # default to preserve original behavior; callers running on long
+            # already-densely-flagged videos may pass ``add_sweep_when_candidates=False``
+            # to save the ~25-30% of OCR frames that the sweep contributes.
+            if add_sweep_when_candidates and duration > 0.0:
                 t = 0.0
                 while t < duration:
                     sample_times.append(round(float(t), 3))
                     t += sample_every_sec
                 sample_times = sorted(set(sample_times))
+
+        # Dedupe samples that are too close together — adjacent flagged
+        # windows (e.g. 60.0, 61.0, 62.0) would otherwise force an OCR pass
+        # on near-identical frames at ~1s/frame inference cost.
+        if candidate_dedup_sec > 0.0 and sample_times:
+            deduped: list[float] = [sample_times[0]]
+            for t in sample_times[1:]:
+                if t - deduped[-1] >= candidate_dedup_sec:
+                    deduped.append(t)
+            sample_times = deduped
 
         if max_frames > 0 and len(sample_times) > max_frames:
             stride = max(1, round(len(sample_times) / max_frames))
