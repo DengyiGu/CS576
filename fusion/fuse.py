@@ -1,7 +1,5 @@
 ﻿from __future__ import annotations
 import json
-import re
-import numpy as np
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -96,8 +94,12 @@ def _audio_delta(
         return 0.0
     return abs(np.mean(after_vals) - np.mean(before_vals))
 
-    phrases = data.get("phrases", {}).get("sponsorship", [])
-    return brands, phrases
+_AD_BRAND_NAMES, _AD_PHRASES = _load_ad_signals()
+_SPONSORSHIP_PHRASES = _AD_PHRASES.get("sponsorship", [])
+_SELF_PROMO_PHRASES = _AD_PHRASES.get("self_promotion", [])
+_OUTRO_PHRASES = _AD_PHRASES.get("outro", [])
+_INTRO_PHRASES = _AD_PHRASES.get("intro", [])
+_RECAP_PHRASES = _AD_PHRASES.get("recap", [])
 
 
 _AD_BRANDS, _AD_PHRASES = _load_ad_signals()
@@ -378,13 +380,14 @@ def _make_segment_dict(label: str, start: float, end: float) -> dict[str, Any]:
     # AUDIO
     anomaly = 0.0
     energy = 1.0
-    audio_label = "unknown"
-    if audio_windows:
-        best = min(audio_windows, key=lambda aw: abs(0.5*(aw.t0 + aw.t1) - t_mid))
-        extra = getattr(best, 'model_extra', {}) or {}
-        anomaly = float(extra.get("anomaly_score", 0.0))
-        energy = float(extra.get("energy_rms", 1.0))
-        audio_label = str(extra.get("audio_label", "unknown"))
+    for aw in audio_windows:
+        d = abs(0.5 * (aw.t0 + aw.t1) - mid)
+        if d < best_dist:
+            best_dist = d
+            extra = aw.model_extra or {}
+            anomaly = float(extra.get("anomaly_score", 0.0))
+            energy = float(extra.get("energy_rms", 1.0))
+    return anomaly, energy
 
 def _label_content_run(
     windows: list[VisualWindow],
@@ -449,14 +452,40 @@ def _build_segments_from_ad_intervals(
         segments.append(_make_segment_dict(label, run_start, run_end))
         i = j
 
-    for i, seg in enumerate(merged):
-        dur = seg["end"] - seg["start"]
-        start, end = seg["start"], seg["end"]
+    window_sec = windows[0].t1 - windows[0].t0 if windows else 2.0
+    min_w = max(1, int(AD_MIN_SEC / window_sec))
+    max_w = max(min_w + 1, int(AD_MAX_SEC / window_sec) + 1)
+    gap_w = max(1, int(GAP_MIN_SEC / window_sec))
 
-        if not intro_done and start < 180 and dur < 200 and i <= 4:
-            final.append({"start": round(start, 3), "end": round(end, 3), "label": LABEL_INTRO, "kind": "non-content"})
-            intro_done = True
+    first_start_idx = 0
+    for i, w in enumerate(windows):
+        if w.t0 >= FIRST_AD_MIN_START_SEC:
+            first_start_idx = i
+            break
+
+    NEG_INF = float("-inf")
+
+    # DP tables: best score ending at position i with exactly k ads
+    dp = np.full((N + 1, max_ads + 1), NEG_INF, dtype=np.float64)
+    prev = np.full((N + 1, max_ads + 1, 2), -1, dtype=np.int32)  # (start, prev_end)
+
+    dp[0, 0] = 0.0
+
+    for e in range(min_w, N + 1):
+        s_lo = max(first_start_idx, e - max_w)
+        s_hi = e - min_w
+        if s_lo > s_hi:
             continue
+        t_e = windows[e - 1].t1
+        for s in range(s_hi, s_lo - 1, -1):
+            if windows[s].t0 < FIRST_AD_MIN_START_SEC:
+                break
+            dur = t_e - windows[s].t0
+            if dur < AD_MIN_SEC:
+                continue
+            if dur > AD_MAX_SEC:
+                break
+            sc = interval_score(s, e)
 
 def _smooth_labels(
     labels: list[str],
