@@ -1,29 +1,25 @@
 # Local data (not committed)
 
-Put your **source videos** under `data/input/` (optionally in a subfolder like **`data/input/videos_with_ads/`** — the CLI finds `test_001.mp4` there automatically). Write analyzer outputs to `data/output/`. Those directories are listed in `.gitignore` so large files stay off git.
+The `data/` folder  holds pipeline outputs . Keep generated files in
+`data/output/` so they stay out of git.
 
-```bash
-mkdir -p data/input data/output
-# Copy or symlink your .mp4 / .mov / etc. into data/input/
-```
+mkdir -p data/output
 
-Run the visual module from the **repository root**:
+When you run the pipeline from the repository root, it writes two JSON files per
+video into `data/output/`:
 
-```bash
-python3 -m visual_analyze \
-  --video "data/input/your_video.mp4" \
-  --out "data/output/your_video_visual_track.json" \
-  --bundle-out "data/output/your_video_analysis_bundle.json"
-```
+<stem>_analysis_bundle.json
+<stem>_segments.json
 
-Optional ingestion (WAV + frames) for other teammates:
+The analysis bundle contains the merged visual, audio, and speech metadata.
+The segments file is the final output from the fusion module.
 
-```bash
-./scripts/ingest_example.sh "data/input/your_video.mp4" "data/output/ingest"
-```
+Source videos live outside `data/`. The `videos_with_ad/` folder is a separate
+top-level directory in the repo and is where the batch pipeline reads videos
+from when you use `--input-dir videos_with_ad`.
 
-Share `*_visual_track.json` or the merged `*_analysis_bundle.json` with Leena for fusion when the other modality fields are filled in.
+If you are working with the stitched `video_info/test_*.json` dataset, keep the
+matching `test_*.mp4` files in `videos_with_ad/` or point the pipeline at a
+different directory with `--input-dir`.
 
-### `video_info` dataset (stitched videos with ads)
-
-If you use the bundled **`video_info/test_*.json`** descriptors, place each **`test_*.mp4`** under **`data/input/`** or under **`videos_with_ad/`** at the repo root (the CLI searches both). Optional: `bash scripts/sync_videos_with_ad_to_data_input.sh` symlinks from `videos_with_ad/` into `data/input/`. Full instructions: [video_info/README.md](../video_info/README.md) and [videos_with_ad/README.md](../videos_with_ad/README.md).
+Full instructions for the stitched video dataset: [videos_with_ad/README.md](../videos_with_ad/README.md) and [video_info/README.md](../video_info/README.md).
