@@ -594,34 +594,65 @@ def _detect_intro_end(windows: list[VisualWindow], min_start: float = 10.0, max_
     return None
 
 
+def _is_outro_window(w: VisualWindow) -> bool:
+    """An outro window is either a true static title card OR a graphics-heavy
+    credit/end-card with substantial text/edges.  Real outros come in two
+    flavors — a frozen end-card (static + pal=1.0) and rolling/title credits
+    (graphics_heavy with high edge density and on-screen text).  The original
+    detector only caught the first kind, so videos like test_009 (animated
+    end-card with text) were silently missed.
+    """
+    if w.visual_hypothesis == "static" and float(w.palette_delta) > 0.9:
+        return True
+    if w.visual_hypothesis == "graphics_heavy" and (
+        float(w.edge_density) >= 0.6 or w.high_text_density
+    ):
+        return True
+    return False
+
+
 def _detect_outro_start(windows: list[VisualWindow], min_static_dur: float = 12.0, min_start_frac: float = 0.8, duration: float = 0.0) -> float | None:
-    """Find outro start by detecting the last long run of static windows near video end.
-    End-cards / title sequences are consistently static with palette_delta=1.0."""
+    """Find outro start by anchoring on the *final* continuous run of
+    outro-looking windows (static end-card OR graphics-heavy credits).
+
+    We deliberately do NOT keep walking backwards to find earlier candidate
+    runs — many videos contain mid-video graphics overlays (e.g. day-in-life
+    text labels at 11:00 AM, 5:00 PM, etc.) that would otherwise be mistaken
+    for a much longer outro.  The outro is the *last* such run, full stop.
+
+    A short non-outro gap of up to ``MAX_GAP_WINDOWS`` is tolerated when
+    extending the run backwards (typical end-cards have a brief talking-head
+    sign-off mixed with a static logo).
+    """
+    if not windows:
+        return None
     min_start = duration * min_start_frac if duration > 0 else 0.0
+    MAX_GAP_WINDOWS = 2
 
-    # Scan from end for the earliest start of the final continuous static block
-    # that is long enough to be an outro
-    best_start: float | None = None
-    i = len(windows) - 1
-    while i >= 0:
-        w = windows[i]
-        if w.t0 < min_start:
-            break
-        if w.visual_hypothesis == "static" and float(w.palette_delta) > 0.9:
-            # extend backwards
-            run_end_t = windows[i].t1
-            j = i
-            while j >= 0 and windows[j].visual_hypothesis == "static" and float(windows[j].palette_delta) > 0.9:
-                j -= 1
-            run_start_t = windows[j + 1].t0
-            run_dur = run_end_t - run_start_t
-            if run_dur >= min_static_dur:
-                best_start = run_start_t
-            i = j
+    n = len(windows)
+    end_i = n - 1
+    while end_i >= 0 and not _is_outro_window(windows[end_i]):
+        end_i -= 1
+    if end_i < 0 or windows[end_i].t0 < min_start:
+        return None
+
+    j = end_i
+    gap = 0
+    while j >= 0:
+        if _is_outro_window(windows[j]):
+            gap = 0
+            j -= 1
+        elif gap < MAX_GAP_WINDOWS and windows[j].t0 >= min_start:
+            gap += 1
+            j -= 1
         else:
-            i -= 1
+            break
+    run_start_t = windows[j + 1 + gap].t0 if gap > 0 else windows[j + 1].t0
+    run_end_t = windows[end_i].t1
 
-    return best_start
+    if run_end_t - run_start_t >= min_static_dur:
+        return run_start_t
+    return None
 
 
 def _snap_boundary_to_shot(windows: list[VisualWindow], idx: int, direction: str, search_sec: float = 6.0) -> int:
@@ -702,15 +733,27 @@ def _build_segments_from_ad_intervals(
         run_start = windows[i].t0
         run_end = windows[j - 1].t1
 
-        # Use detected intro/outro boundaries
-        if intro_end_sec is not None and run_start < intro_end_sec:
-            label = LABEL_INTRO
-        elif outro_start_sec is not None and run_end > outro_start_sec:
-            label = LABEL_OUTRO
+        # Split the run at intro_end_sec / outro_start_sec so we don't
+        # accidentally label, e.g., 0-60s as "Intro" when the actual intro
+        # only goes 0-42s and the rest is normal pre-ad content.
+        if (
+            intro_end_sec is not None
+            and run_start < intro_end_sec < run_end
+        ):
+            segments.append(_make_segment_dict(LABEL_INTRO, run_start, intro_end_sec))
+            segments.append(_make_segment_dict(LABEL_CORE_CONTENT, intro_end_sec, run_end))
+        elif (
+            outro_start_sec is not None
+            and run_start < outro_start_sec < run_end
+        ):
+            segments.append(_make_segment_dict(LABEL_CORE_CONTENT, run_start, outro_start_sec))
+            segments.append(_make_segment_dict(LABEL_OUTRO, outro_start_sec, run_end))
+        elif intro_end_sec is not None and run_end <= intro_end_sec:
+            segments.append(_make_segment_dict(LABEL_INTRO, run_start, run_end))
+        elif outro_start_sec is not None and run_start >= outro_start_sec:
+            segments.append(_make_segment_dict(LABEL_OUTRO, run_start, run_end))
         else:
-            label = LABEL_CORE_CONTENT
-
-        segments.append(_make_segment_dict(label, run_start, run_end))
+            segments.append(_make_segment_dict(LABEL_CORE_CONTENT, run_start, run_end))
         i = j
 
     segments.sort(key=lambda s: s["start"])
