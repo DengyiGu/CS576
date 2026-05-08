@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
@@ -21,16 +21,17 @@ _KIND_FOR_LABEL: dict[str, str] = {
 }
 
 # Hyper-parameters
-AD_MIN_SEC = 20.0
-AD_MAX_SEC = 130.0
-GAP_MIN_SEC = 60.0
-FIRST_AD_MIN_START_SEC = 30.0
+# Hyper-parameters - tuned for this project style
+AD_MIN_SEC = 28.0
+AD_MAX_SEC = 60.0
+GAP_MIN_SEC = 190.0        # Stronger separation between ads
+FIRST_AD_MIN_START_SEC = 50.0
 
-W_AUDIO = 1.00
-W_VISUAL_SEMANTIC = 0.50
+W_AUDIO = 1.50
+W_VISUAL_SEMANTIC = 0.95
 
-SMOOTH_HALF_WIN = 2
-SPEECH_CONTEXT_SEC = 6.0
+SMOOTH_HALF_WIN = 7
+SPEECH_CONTEXT_SEC = 18.0
 
 EDGE_WEIGHT = 2.5
 INTERIOR_WEIGHT = 1.0
@@ -115,7 +116,7 @@ def _has_nearby_speech(
 def _speech_text_ad_signal(
     t0: float, t1: float, speech_spans: list[SpeechSpan]
 ) -> float:
-    lo, hi = t0 - 20.0, t1 + 20.0
+    lo, hi = t0 - 30.0, t1 + 30.0
     chunks = [
         s.text.lower() for s in speech_spans
         if s.t1 >= lo and s.t0 <= hi and s.text
@@ -123,14 +124,17 @@ def _speech_text_ad_signal(
     if not chunks:
         return 0.0
     combined = " ".join(chunks)
+
     for phrase in _SPONSORSHIP_PHRASES:
         if phrase in combined:
             return 0.9
+
     brand_hits = sum(1 for b in _AD_BRAND_NAMES if b in combined)
     if brand_hits >= 2:
-        return 0.6
+        return 0.75
     if brand_hits == 1:
-        return 0.3
+        return 0.45
+
     return 0.0
 
 
@@ -156,31 +160,37 @@ def _compute_foreignness_scores(
     for i, w in enumerate(windows):
         t0, t1 = w.t0, w.t1
         mid = 0.5 * (t0 + t1)
-        palette_score = float(w.palette_delta)
+
         visual_semantic = _visual_semantic_ad_score(w)
         anomaly, energy = _audio_features(t0, t1, audio_windows)
         audio_score = float(anomaly)
-        if energy < 0.015:
-            audio_score = max(audio_score, 0.8)
+
+        if energy < 0.04:
+            audio_score = max(audio_score, 0.92)
+
         cov = _speech_coverage(t0, t1, speech_spans)
         nearby = _has_nearby_speech(t0, t1, speech_spans, SPEECH_CONTEXT_SEC)
         text_sig = _speech_text_ad_signal(t0, t1, speech_spans)
+
         nospeech_score = 0.0
         if not nearby:
-            nospeech_score = 0.85
-        elif cov < 0.05:
-            nospeech_score = 0.55
+            nospeech_score = 0.95
+        elif cov < 0.18:
+            nospeech_score = 0.80
+
         if text_sig > 0:
             audio_score = max(audio_score, text_sig)
-            nospeech_score = max(nospeech_score, 0.4)
-        if mid < FIRST_AD_MIN_START_SEC or mid > duration - 20.0:
-            palette_score *= 0.1
-            visual_semantic *= 0.1
-            audio_score *= 0.1
-            nospeech_score *= 0.1
+
+        # Tighter intro/outro protection
+        if mid < duration * 0.055 or mid > duration * 0.94:
+            visual_semantic *= 0.25
+            audio_score *= 0.25
+            nospeech_score *= 0.25
+
         scores[i] = (
             W_VISUAL_SEMANTIC * visual_semantic
             + W_AUDIO * audio_score
+            + 0.60 * nospeech_score
         )
     return scores
 
@@ -198,22 +208,21 @@ def _compute_edge_scores(
         vis = float(windows[i].palette_delta)
         scene_cut = 1.0 if windows[i].shot_boundary_near else 0.0
         if windows[i].shot_boundary_distance_sec is not None:
-            scene_cut = max(scene_cut, max(0.0, 1.0 - float(windows[i].shot_boundary_distance_sec) / 2.0))
-        aud_delta = _audio_delta(t_boundary, audio_windows, half_sec=3.0)
-        had_speech_before = _has_nearby_speech(
-            t_boundary - 4.0, t_boundary, speech_spans, 0.5
-        )
-        has_speech_after = _has_nearby_speech(
-            t_boundary, t_boundary + 4.0, speech_spans, 0.5
-        )
-        speech_transition = 1.0 if (had_speech_before != has_speech_after) else 0.0
-        mid = t_boundary
-        if mid < FIRST_AD_MIN_START_SEC or mid > duration - 20.0:
-            vis *= 0.1
-            scene_cut *= 0.1
-            aud_delta *= 0.1
-            speech_transition *= 0.1
-        edge[i] = 0.40 * vis + 0.25 * scene_cut + 0.25 * aud_delta + 0.10 * speech_transition
+            scene_cut = max(scene_cut, max(0.0, 1.0 - float(windows[i].shot_boundary_distance_sec) / 9.0))
+
+        aud_delta = _audio_delta(t_boundary, audio_windows, half_sec=8.0)
+
+        had = _has_nearby_speech(t_boundary - 12.0, t_boundary, speech_spans, 3.0)
+        has = _has_nearby_speech(t_boundary, t_boundary + 12.0, speech_spans, 3.0)
+        speech_transition = 1.0 if (had != has) else 0.0
+
+        if t_boundary < duration * 0.06 or t_boundary > duration * 0.93:
+            vis *= 0.20
+            scene_cut *= 0.20
+            aud_delta *= 0.25
+            speech_transition *= 0.20
+
+        edge[i] = 0.62 * vis + 0.18 * scene_cut + 0.15 * aud_delta + 0.05 * speech_transition
     return edge
 
 
@@ -393,8 +402,7 @@ def _build_segments_from_ad_intervals(
     for s, e in ad_intervals:
         for i in range(s, min(e, N)):
             is_ad[i] = True
-    first_ad_start = ad_intervals[0][0] if ad_intervals else N
-    last_ad_end = ad_intervals[-1][1] if ad_intervals else 0
+
     segments: list[dict[str, Any]] = []
     i = 0
     while i < N:
@@ -408,29 +416,25 @@ def _build_segments_from_ad_intervals(
                 windows[j - 1].t1,
             ))
             i = j
+            continue
+
+        j = i
+        while j < N and not is_ad[j]:
+            j += 1
+        run_start = windows[i].t0
+        run_end = windows[j - 1].t1
+
+        # Tighter intro/outro
+        if run_start < 50.0 and run_end < 70.0:
+            label = LABEL_INTRO
+        elif run_start > duration - 60.0:
+            label = LABEL_OUTRO
         else:
-            j = i
-            while j < N and not is_ad[j]:
-                j += 1
-            run_start = windows[i].t0
-            run_end = windows[j - 1].t1
-            is_before = (j - 1) < first_ad_start
-            is_after = i >= last_ad_end
-            if is_before and intro_end_sec is not None:
-                cut = min(intro_end_sec, run_end)
-                if cut > run_start:
-                    segments.append(_make_segment_dict(LABEL_INTRO, run_start, cut))
-                if cut < run_end:
-                    segments.append(_make_segment_dict(LABEL_CORE_CONTENT, cut, run_end))
-            elif is_after and outro_start_sec is not None:
-                cut = max(outro_start_sec, run_start)
-                if cut > run_start:
-                    segments.append(_make_segment_dict(LABEL_CORE_CONTENT, run_start, cut))
-                if cut < run_end:
-                    segments.append(_make_segment_dict(LABEL_OUTRO, cut, run_end))
-            else:
-                segments.append(_make_segment_dict(LABEL_CORE_CONTENT, run_start, run_end))
-            i = j
+            label = LABEL_CORE_CONTENT
+
+        segments.append(_make_segment_dict(label, run_start, run_end))
+        i = j
+
     segments.sort(key=lambda s: s["start"])
     return segments
 

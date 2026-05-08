@@ -18,7 +18,12 @@
       "tropicana", "minute maid", "simply orange", "naked juice",
       "yoplait", "chobani", "fage", "activia",
       "hellmann's", "hellmans", "kraft", "heinz", "kellogg's", "kelloggs",
-      "general mills", "quaker", "campbells", "campbell's", "frank's red hot"
+      "general mills", "quaker", "campbells", "campbell's", "frank's red hot",
+      "cheerios", "frosted flakes", "lucky charms", "cinnamon toast crunch",
+      "froot loops", "apple jacks", "rice krispies", "corn flakes", "special k",
+      "raisin bran", "post", "shredded wheat", "grape-nuts", "life cereal",
+      "kix", "wheaties", "cap'n crunch", "honey bunches of oats", "fruity pebbles",
+      "cocoa pebbles", "trix", "cocoa puffs", "count chocula", "mini wheats"
     ],
     "tech_electronics": [
       "apple", "iphone", "ipad", "macbook", "airpods",
@@ -26,7 +31,7 @@
       "google", "google pixel", "pixel phone", "google home",
       "microsoft", "surface", "xbox", "windows",
       "sony", "playstation", "ps5", "ps4", "bosch",
-      "nvidia", "intel", "amd", "qualcomm",
+      "nvidia", "intel", "ramp", "amd", "qualcomm",
       "lg", "lenovo", "dell", "hp", "asus", "acer", "razer",
       "amazon", "amazon echo", "alexa", "amazon fire", "kindle",
       "meta", "oculus", "quest", "meta quest",
@@ -109,7 +114,8 @@
       "directv", "starlink"
     ],
     "subscription_lifestyle": [
-      "hello fresh", "hellofresh", "factor", "blue apron", "sunbasket", "instacart",
+      "hello fresh", "hellofresh", "factor", "blue apron", "sunbasket", 
+      "instacart", "uber eats", "doordash", "grubhub", "postmates",
       "daily harvest", "home chef",
       "dollar shave club", "manscaped", "native",
       "stitch fix", "trunk club", "bombas", "quip",
