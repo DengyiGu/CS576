@@ -359,19 +359,6 @@ def _audio_delta(
     return abs(np.mean(after_vals) - np.mean(before_vals))
 
 
-def _speech_coverage(t0: float, t1: float, speech_spans: list[SpeechSpan]) -> float:
-    dur = max(t1 - t0, 1e-6)
-    covered = 0.0
-    for span in speech_spans:
-        if (span.model_extra or {}).get("source") in {"ocr", "semantic", "semantic_structure"}:
-            continue
-        ov_s = max(t0, span.t0)
-        ov_e = min(t1, span.t1)
-        if ov_e > ov_s and span.text:
-            covered += ov_e - ov_s
-    return min(1.0, covered / dur)
-
-
 def _asr_speech_coverage(t0: float, t1: float, speech_spans: list[SpeechSpan]) -> float:
     dur = max(t1 - t0, 1e-6)
     covered = 0.0
@@ -542,7 +529,7 @@ def _compute_foreignness_scores(
         if energy < 0.015:
             audio_score = max(audio_score, 0.20)
 
-        cov    = _speech_coverage(t0, t1, speech_spans)
+        cov    = _asr_speech_coverage(t0, t1, speech_spans)
         nearby = _has_nearby_speech(t0, t1, speech_spans, SPEECH_CONTEXT_SEC)
         text_sig = _speech_text_ad_signal(t0, t1, speech_spans)
         content_penalty = _content_text_penalty(t0, t1, speech_spans)
