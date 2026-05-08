@@ -67,7 +67,7 @@ INTERIOR_WEIGHT   = 1.5
 TEXT_WEIGHT       = 1.0
 CONTENT_PENALTY_WEIGHT = 3.0
 SEMANTIC_AD_THRESHOLD = 0.78
-SEMANTIC_WEAK_AD_THRESHOLD = 0.72
+SEMANTIC_WEAK_AD_THRESHOLD = 0.70
 SEMANTIC_WEAK_AD_MARGIN = 0.10
 DIRECTION_WEIGHT = 2.0
 DIRECTION_CONTEXT_SEC = 45.0
@@ -84,7 +84,7 @@ DURATION_WEIGHT   = 0.0
 
 # Non-ad segmentation rules.  These only split content regions after the ad
 # intervals have already been selected, so they do not move ad boundaries.
-EDGE_TITLE_CARD_SEC = 30.0
+EDGE_TITLE_CARD_SEC = 55.0
 MIN_EDGE_AUXILIARY_SEC = 4.0
 OPENING_SEQUENCE_MAX_SEC = 90.0
 ENDING_SEQUENCE_MIN_SEC = 18.0
@@ -410,8 +410,9 @@ def _speech_text_ad_signal(
             continue
         extra = span.model_extra or {}
         source = extra.get("source")
-        semantic_score = max(semantic_score, float(extra.get("semantic_ad_score", 0.0)))
-        semantic_margin = max(semantic_margin, float(extra.get("semantic_margin", 0.0)))
+        if source == "semantic" and float(span.t1) - float(span.t0) <= 75.0:
+            semantic_score = max(semantic_score, float(extra.get("semantic_ad_score", 0.0)))
+            semantic_margin = max(semantic_margin, float(extra.get("semantic_margin", 0.0)))
         if source in {"semantic", "semantic_structure"}:
             continue
         if span.text:
@@ -764,8 +765,94 @@ def _text_anchor_times(speech_spans: list[SpeechSpan]) -> list[float]:
     return sorted(set(round(anchor, 3) for anchor in anchors))
 
 
+def _ad_anchor_times_in_range(
+    t0: float,
+    t1: float,
+    speech_spans: list[SpeechSpan],
+) -> list[float]:
+    anchors = [
+        anchor
+        for anchor in _text_anchor_times(speech_spans)
+        if t0 - 3.0 <= anchor <= t1 + 3.0
+    ]
+
+    for span in speech_spans:
+        extra = span.model_extra or {}
+        if extra.get("source") != "semantic":
+            continue
+        if float(span.t1) - float(span.t0) > 75.0:
+            continue
+        if float(extra.get("semantic_ad_score", 0.0)) < SEMANTIC_WEAK_AD_THRESHOLD:
+            continue
+        if float(extra.get("semantic_margin", 0.0)) < SEMANTIC_WEAK_AD_MARGIN:
+            continue
+        if span.t1 >= t0 - 3.0 and span.t0 <= t1 + 3.0:
+            anchors.append(0.5 * (float(span.t0) + float(span.t1)))
+    return sorted(set(round(anchor, 3) for anchor in anchors))
+
+
 def _has_text_anchor_in_range(t0: float, t1: float, speech_spans: list[SpeechSpan]) -> bool:
-    return any(t0 - 3.0 <= anchor <= t1 + 3.0 for anchor in _text_anchor_times(speech_spans))
+    return bool(_ad_anchor_times_in_range(t0, t1, speech_spans))
+
+
+def _meaningful_asr_text(text: str) -> bool:
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    if not words:
+        return False
+    normalized = " ".join(words)
+    if normalized in {"music", "musics", "silence"}:
+        return False
+    if len(words) == 1 and words[0] in {"music", "silence"}:
+        return False
+    return True
+
+
+def _meaningful_asr_bounds(
+    t0: float,
+    t1: float,
+    speech_spans: list[SpeechSpan],
+    *,
+    min_chars: int = 35,
+    min_spans: int = 3,
+) -> tuple[float | None, float | None]:
+    selected: list[SpeechSpan] = []
+    for span in speech_spans:
+        if span.t1 < t0 or span.t0 > t1 or not span.text:
+            continue
+        if _span_source(span) in {"ocr", "semantic", "semantic_structure"}:
+            continue
+        if _meaningful_asr_text(span.text):
+            selected.append(span)
+    if not selected:
+        return None, None
+    combined = " ".join(span.text for span in selected)
+    if len(selected) < min_spans and len(combined) < min_chars:
+        return None, None
+    return min(float(span.t0) for span in selected), max(float(span.t1) for span in selected)
+
+
+def _semantic_ad_search_range(
+    t0: float,
+    t1: float,
+    speech_spans: list[SpeechSpan],
+) -> tuple[float, float] | None:
+    starts: list[float] = []
+    ends: list[float] = []
+    for span in speech_spans:
+        extra = span.model_extra or {}
+        if extra.get("source") != "semantic":
+            continue
+        score = float(extra.get("semantic_ad_score", 0.0))
+        margin = float(extra.get("semantic_margin", 0.0))
+        if score < SEMANTIC_WEAK_AD_THRESHOLD or margin < SEMANTIC_WEAK_AD_MARGIN:
+            continue
+        if span.t1 < t0 or span.t0 > t1:
+            continue
+        starts.append(float(span.t0))
+        ends.append(float(span.t1))
+    if not starts:
+        return None
+    return min(min(starts), t0), max(max(ends), t1)
 
 
 def _find_text_anchor_intervals(
@@ -1455,6 +1542,55 @@ def _trim_confirmed_ad_tails(
     return trimmed
 
 
+def _snap_text_supported_ad_boundaries(
+    interval: tuple[int, int],
+    windows: list[VisualWindow],
+    speech_spans: list[SpeechSpan],
+) -> tuple[int, int]:
+    start, end = interval
+    if not windows or end <= start:
+        return interval
+
+    interval_t0 = windows[start].t0
+    interval_t1 = windows[end - 1].t1
+    semantic_range = _semantic_ad_search_range(interval_t0, interval_t1, speech_spans)
+    if semantic_range is not None:
+        search_t0 = max(0.0, semantic_range[0] - 3.0)
+        search_t1 = min(windows[-1].t1, semantic_range[1] + 3.0)
+    else:
+        search_t0 = max(0.0, interval_t0 - 3.0)
+        search_t1 = min(windows[-1].t1, interval_t1 + 3.0)
+
+    asr_start, asr_end = _meaningful_asr_bounds(search_t0, search_t1, speech_spans)
+    if asr_start is None or asr_end is None:
+        return interval
+
+    target_start_time = max(search_t0, asr_start)
+    target_end_time = min(windows[-1].t1, asr_end + 2.0)
+    if target_end_time <= target_start_time:
+        return interval
+
+    def index_for_start(t: float) -> int:
+        for index, window in enumerate(windows):
+            if window.t0 <= t < window.t1:
+                return index
+        return max(0, min(len(windows) - 1, start))
+
+    def index_for_end(t: float) -> int:
+        for index, window in enumerate(windows):
+            if window.t0 < t <= window.t1:
+                return index + 1
+        return max(start + 1, min(len(windows), end))
+
+    snapped_start = index_for_start(target_start_time)
+    snapped_end = index_for_end(target_end_time)
+    window_sec = windows[0].t1 - windows[0].t0 if windows else 1.0
+    min_w = max(1, int(AD_MIN_SEC / max(window_sec, 1e-6)))
+    if snapped_end - snapped_start < min_w:
+        snapped_end = min(len(windows), snapped_start + min_w)
+    return snapped_start, snapped_end
+
+
 def _trim_text_anchor_tails(
     intervals: list[tuple[int, int]],
     windows: list[VisualWindow],
@@ -1494,6 +1630,92 @@ def _trim_text_anchor_tails(
                 break
         trimmed.append((start, max(start + min_w, new_end)))
 
+    return trimmed
+
+
+def _semantic_ad_bounds_in_range(
+    t0: float,
+    t1: float,
+    speech_spans: list[SpeechSpan],
+) -> tuple[float, float] | None:
+    starts: list[float] = []
+    ends: list[float] = []
+    for span in speech_spans:
+        extra = span.model_extra or {}
+        if extra.get("source") != "semantic":
+            continue
+        if float(span.t1) - float(span.t0) > 75.0:
+            continue
+        if float(extra.get("semantic_ad_score", 0.0)) < SEMANTIC_WEAK_AD_THRESHOLD:
+            continue
+        if float(extra.get("semantic_margin", 0.0)) < SEMANTIC_WEAK_AD_MARGIN:
+            continue
+        if span.t1 < t0 - 3.0 or span.t0 > t1 + 3.0:
+            continue
+        starts.append(float(span.t0))
+        ends.append(float(span.t1))
+    if not starts:
+        return None
+    return min(starts), max(ends)
+
+
+def _trim_semantic_ad_tails(
+    intervals: list[tuple[int, int]],
+    windows: list[VisualWindow],
+    speech_spans: list[SpeechSpan],
+) -> list[tuple[int, int]]:
+    if not windows:
+        return intervals
+    window_sec = windows[0].t1 - windows[0].t0
+    min_w = max(1, int(AD_MIN_SEC / max(window_sec, 1e-6)))
+    trimmed: list[tuple[int, int]] = []
+    for start, end in intervals:
+        start_time = windows[start].t0
+        end_time = windows[end - 1].t1
+        semantic_bounds = _semantic_ad_bounds_in_range(start_time, end_time, speech_spans)
+        if semantic_bounds is None:
+            trimmed.append((start, end))
+            continue
+
+        _, semantic_end = semantic_bounds
+        target_end_time = min(end_time, semantic_end + 5.0)
+        short_semantic_ends = [
+            float(span.t1)
+            for span in speech_spans
+            if (span.model_extra or {}).get("source") == "semantic"
+            and float(span.t1) - float(span.t0) <= 20.0
+            and float((span.model_extra or {}).get("semantic_ad_score", 0.0)) >= SEMANTIC_WEAK_AD_THRESHOLD
+            and float((span.model_extra or {}).get("semantic_margin", 0.0)) >= SEMANTIC_WEAK_AD_MARGIN
+            and span.t1 >= start_time - 3.0
+            and span.t0 <= end_time + 3.0
+        ]
+        target_start_time = start_time
+        if short_semantic_ends:
+            short_end = max(short_semantic_ends)
+            if short_end - start_time >= AD_MIN_SEC and end_time - short_end <= 20.0:
+                target_end_time = min(target_end_time, max(start_time + AD_MIN_SEC, short_end - 2.0))
+                target_start_time = max(start_time, target_end_time - 36.0)
+
+        new_start = start
+        if target_start_time > start_time + 4.0:
+            for index in range(start, end):
+                if windows[index].t0 >= target_start_time:
+                    new_start = index
+                    break
+            if end - new_start < min_w:
+                new_start = max(start, end - min_w)
+
+        should_keep_end = end_time - target_end_time < 8.0 and not short_semantic_ends
+        if should_keep_end:
+            trimmed.append((new_start, end))
+            continue
+
+        new_end = end
+        for index in range(new_start + min_w, end + 1):
+            if windows[index - 1].t1 >= target_end_time:
+                new_end = index
+                break
+        trimmed.append((new_start, max(new_start + min_w, new_end)))
     return trimmed
 
 
@@ -1816,6 +2038,21 @@ def _has_opening_title_signal(
     )
 
 
+def _opening_ocr_text_end(t0: float, t1: float, speech_spans: list[SpeechSpan]) -> float | None:
+    ends: list[float] = []
+    for span in speech_spans:
+        if _span_source(span) != "ocr" or span.t1 <= t0 or span.t0 >= t1 or not span.text:
+            continue
+        words = re.findall(r"[a-z0-9']+", span.text.lower())
+        if not words:
+            continue
+        alpha_words = sum(1 for word in words if any(ch.isalpha() for ch in word))
+        numeric_ratio = sum(1 for word in words if any(ch.isdigit() for ch in word)) / len(words)
+        if alpha_words >= 2 and numeric_ratio <= 0.40:
+            ends.append(float(span.t1))
+    return max(ends) if ends else None
+
+
 def _edge_intro_end_time(
     windows: list[VisualWindow],
     run_indices: list[int],
@@ -1835,10 +2072,24 @@ def _edge_intro_end_time(
     if first_asr_start is not None and first_asr_start - run_start >= 15.0:
         intro_end = min(first_asr_start, run_start + OPENING_SEQUENCE_MAX_SEC, run_end)
         if _has_opening_title_signal(run_start, intro_end, windows, run_indices, speech_spans):
+            ocr_intro_end = _opening_ocr_text_end(run_start, intro_end, speech_spans)
+            if (
+                ocr_intro_end is not None
+                and ocr_intro_end - run_start >= MIN_EDGE_AUXILIARY_SEC
+                and ocr_intro_end < intro_end
+            ):
+                return ocr_intro_end
             return intro_end
 
     short_title_end = min(run_start + EDGE_TITLE_CARD_SEC, run_end)
     if _has_opening_title_signal(run_start, short_title_end, windows, run_indices, speech_spans):
+        ocr_intro_end = _opening_ocr_text_end(run_start, short_title_end, speech_spans)
+        if (
+            ocr_intro_end is not None
+            and ocr_intro_end - run_start >= MIN_EDGE_AUXILIARY_SEC
+            and ocr_intro_end < short_title_end
+        ):
+            return ocr_intro_end
         return short_title_end
     return None
 
@@ -1899,7 +2150,7 @@ def _merge_short_core_content_segments(segments: list[dict[str, Any]]) -> list[d
         elif next_label in auxiliary_labels:
             segment["label"] = next_label
             segment["kind"] = _KIND_FOR_LABEL[next_label]
-        elif previous_label in auxiliary_labels:
+        elif previous_label in auxiliary_labels and next_label != LABEL_ADVERTISEMENT:
             segment["label"] = previous_label
             segment["kind"] = _KIND_FOR_LABEL[previous_label]
 
@@ -2060,6 +2311,14 @@ def _passes_final_ad_filters(
         return False
     if (
         not has_text_anchor
+        and final_text_mean < 0.08
+        and final_text_peak <= 0.35
+        and final_foreign_mean < 0.68
+        and final_boundary_mean < 0.50
+    ):
+        return False
+    if (
+        not has_text_anchor
         and asr_coverage >= 0.75
         and final_text_peak < 0.05
         and final_foreign_mean < 0.40
@@ -2206,6 +2465,12 @@ def fuse_bundle_to_segments(
                 and interval_foreign_mean >= 0.25
             )
             if interval_duration <= 45.0 and (should_expand_text_ad or should_expand_visual_ad):
+                pre_expand_rs = rs
+                pre_expand_anchor_times = _ad_anchor_times_in_range(
+                    windows[rs].t0,
+                    windows[re - 1].t1,
+                    bundle.speech_spans,
+                )
                 rs, re = _expand_ad_interval(
                     rs,
                     re,
@@ -2216,6 +2481,13 @@ def fuse_bundle_to_segments(
                     search_sec=25.0 if should_expand_text_ad else 12.0,
                     aggressive_visual=should_expand_text_ad or should_expand_visual_ad,
                 )
+                earliest_anchor = min(pre_expand_anchor_times) if pre_expand_anchor_times else None
+                if (
+                    rs < pre_expand_rs
+                    and earliest_anchor is not None
+                    and earliest_anchor - windows[pre_expand_rs].t0 >= AD_MIN_SEC
+                ):
+                    rs = pre_expand_rs
             final_interval = (rs, re)
             if not _passes_final_ad_filters(
                 final_interval,
@@ -2256,6 +2528,11 @@ def fuse_bundle_to_segments(
                 windows[re - 1].t1,
                 bundle.speech_spans,
             )
+            anchor_times_after_refine = _ad_anchor_times_in_range(
+                windows[rs].t0,
+                windows[re - 1].t1,
+                bundle.speech_spans,
+            )
             opt_rs, opt_re = _optimize_interval_boundaries(
                 (rs, re),
                 windows,
@@ -2269,13 +2546,37 @@ def fuse_bundle_to_segments(
             if has_text_anchor_after_refine:
                 window_sec = windows[0].t1 - windows[0].t0 if windows else 1.0
                 max_anchor_shift_w = 0
+                earliest_anchor = min(anchor_times_after_refine) if anchor_times_after_refine else None
+                if (
+                    opt_rs < rs
+                    and earliest_anchor is not None
+                    and earliest_anchor - windows[rs].t0 >= AD_MIN_SEC
+                ):
+                    opt_rs = rs
                 if opt_rs > rs:
-                    opt_rs = min(opt_rs, rs + max_anchor_shift_w)
+                    if (
+                        earliest_anchor is not None
+                        and earliest_anchor - windows[rs].t0 < AD_MIN_SEC
+                    ):
+                        anchor_index = rs
+                        for index, window in enumerate(windows):
+                            if window.t0 <= earliest_anchor < window.t1:
+                                anchor_index = index
+                                break
+                        opt_rs = min(opt_rs, anchor_index)
+                    else:
+                        opt_rs = min(opt_rs, rs + max_anchor_shift_w)
                 if opt_re > re:
                     opt_re = min(opt_re, re + max_anchor_shift_w)
                 elif opt_re < re:
                     opt_re = max(opt_re, re - max_anchor_shift_w)
             rs, re = opt_rs, opt_re
+            if not has_text_anchor_after_refine:
+                rs, re = _snap_text_supported_ad_boundaries(
+                    (rs, re),
+                    windows,
+                    bundle.speech_spans,
+                )
             if not _passes_final_ad_filters(
                 (rs, re),
                 windows,
@@ -2298,6 +2599,7 @@ def fuse_bundle_to_segments(
             bundle.speech_spans,
         )
         refined = _trim_text_anchor_tails(refined, windows, bundle.speech_spans)
+        refined = _trim_semantic_ad_tails(refined, windows, bundle.speech_spans)
         refined = _trim_confirmed_ad_tails(refined, windows, content_penalties, text_scores)
         return _build_segments_from_ad_intervals(refined, windows, duration, bundle.speech_spans)
 
