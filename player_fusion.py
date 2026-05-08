@@ -98,7 +98,12 @@ def _run_fusion_live(video_path: Path) -> list[Segment]:
     try:
         from Automatic_speech_recognition.segment_text_analyzer import build_speech_spans
         print(f"[fusion] Running speech recognition on {video_path.name} ...", file=sys.stderr)
-        bundle.speech_spans = build_speech_spans(video_path, vad=True)
+        bundle.speech_spans = build_speech_spans(
+            video_path,
+            device="cpu",
+            compute_type="int8",
+            vad=True,
+        )
         print(f"[fusion] Got {len(bundle.speech_spans)} speech spans.", file=sys.stderr)
     except Exception as e:
         print(f"[fusion] Speech recognition unavailable, skipping: {e}", file=sys.stderr)
