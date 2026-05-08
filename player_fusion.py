@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -94,47 +95,59 @@ def _run_fusion_live(video_path: Path) -> list[Segment]:
     except Exception as e:
         print(f"[fusion] Audio analysis unavailable, skipping: {e}", file=sys.stderr)
 
-    # Wire in speech recognition if the module is available
-    try:
-        from Automatic_speech_recognition.segment_text_analyzer import build_speech_spans
-        print(f"[fusion] Running speech recognition on {video_path.name} ...", file=sys.stderr)
-        bundle.speech_spans = build_speech_spans(
-            video_path,
-            device="cpu",
-            compute_type="int8",
-            vad=True,
-        )
-        print(f"[fusion] Got {len(bundle.speech_spans)} speech spans.", file=sys.stderr)
-    except Exception as e:
-        print(f"[fusion] Speech recognition unavailable, skipping: {e}", file=sys.stderr)
-
-    # Optional OCR: sample only visually suspicious windows, so it adds text
-    # evidence for silent/product ads without scanning every frame.
-    try:
-        from ocr.analyze import build_ocr_spans
-
-        ocr_candidate_times = [
-            0.5 * (window.t0 + window.t1)
-            for window in bundle.visual.windows
-            if (
-                window.high_text_density
-                or window.visual_hypothesis in {"graphics_heavy", "static"}
-                or window.palette_delta > 0.35
+    def run_speech_recognition() -> list[Any]:
+        try:
+            from Automatic_speech_recognition.segment_text_analyzer import build_speech_spans
+            print(f"[fusion] Running speech recognition on {video_path.name} ...", file=sys.stderr)
+            speech_spans = build_speech_spans(
+                video_path,
+                device="cpu",
+                compute_type="int8",
+                vad=True,
             )
-        ]
-        text_device = "cuda" if USE_CUDA_FOR_TEXT_MODELS else "cpu"
-        print(f"[fusion] Running OCR on {video_path.name} ({text_device}) ...", file=sys.stderr)
-        ocr_spans = build_ocr_spans(
-            video_path,
-            candidate_times=ocr_candidate_times,
-            sample_every_sec=10.0,
-            max_frames=260,
-            gpu=USE_CUDA_FOR_TEXT_MODELS,
-        )
-        bundle.speech_spans.extend(ocr_spans)
-        print(f"[fusion] Got {len(ocr_spans)} OCR text spans.", file=sys.stderr)
-    except Exception as e:
-        print(f"[fusion] OCR unavailable, skipping: {e}", file=sys.stderr)
+            print(f"[fusion] Got {len(speech_spans)} speech spans.", file=sys.stderr)
+            return speech_spans
+        except Exception as e:
+            print(f"[fusion] Speech recognition unavailable, skipping: {e}", file=sys.stderr)
+            return []
+
+    def run_ocr() -> list[Any]:
+        # Optional OCR: sample only visually suspicious windows, so it adds text
+        # evidence for silent/product ads without scanning every frame.
+        try:
+            from ocr.analyze import build_ocr_spans
+
+            ocr_candidate_times = [
+                0.5 * (window.t0 + window.t1)
+                for window in bundle.visual.windows
+                if (
+                    window.high_text_density
+                    or window.visual_hypothesis in {"graphics_heavy", "static"}
+                    or window.palette_delta > 0.35
+                )
+            ]
+            text_device = "cuda" if USE_CUDA_FOR_TEXT_MODELS else "cpu"
+            print(f"[fusion] Running OCR on {video_path.name} ({text_device}) ...", file=sys.stderr)
+            ocr_spans = build_ocr_spans(
+                video_path,
+                candidate_times=ocr_candidate_times,
+                sample_every_sec=10.0,
+                max_frames=260,
+                gpu=USE_CUDA_FOR_TEXT_MODELS,
+            )
+            print(f"[fusion] Got {len(ocr_spans)} OCR text spans.", file=sys.stderr)
+            return ocr_spans
+        except Exception as e:
+            print(f"[fusion] OCR unavailable, skipping: {e}", file=sys.stderr)
+            return []
+
+    # ASR uses CPU while OCR can use GPU, so run them together after visual
+    # windows exist. Merge results after both complete to keep deterministic order.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        speech_future = executor.submit(run_speech_recognition)
+        ocr_future = executor.submit(run_ocr)
+        bundle.speech_spans = speech_future.result()
+        bundle.speech_spans.extend(ocr_future.result())
 
     # Optional semantic text scoring: merge short ASR/OCR spans into longer
     # context windows, then add ad and structure scores for fusion to consume.
