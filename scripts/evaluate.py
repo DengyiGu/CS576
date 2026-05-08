@@ -85,17 +85,14 @@ def _load_predicted_ads(segments_path: Path) -> list[dict]:
     # Change this to kind == "non-content" for a broader non-content evaluation.
     return [s for s in all_segs if s.get("label") == "Advertisement"]
 
-
 # Metric computation
 def _overlap_seconds(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
     return max(0.0, min(a_end, b_end) - max(a_start, b_start))
-
 
 def _iou(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
     intersection = _overlap_seconds(a_start, a_end, b_start, b_end)
     union = (a_end - a_start) + (b_end - b_start) - intersection
     return intersection / union if union > 1e-9 else 0.0
-
 
 def _temporal_precision_recall(
     predicted: list[dict],

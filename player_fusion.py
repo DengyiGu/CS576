@@ -33,6 +33,7 @@ crashes.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,8 @@ from typing import Any
 
 from player.segments import Segment, build_full_content_segment, build_segment_from_payload, probe_video_duration_seconds
 
+TEXT_MODEL_DEVICE = os.environ.get("CS576_TEXT_MODEL_DEVICE", "cuda").strip().lower()
+USE_CUDA_FOR_TEXT_MODELS = TEXT_MODEL_DEVICE == "cuda"
 
 # Candidate locations for a pre-computed segments file
 
@@ -78,13 +81,13 @@ def _run_fusion_live(video_path: Path) -> list[Segment]:
     from visual.analyze import build_analysis_bundle
     from fusion.fuse import fuse_bundle_to_segments
 
-    print(f"[fusion] Running visual analysis on {video_path.name} …", file=sys.stderr)
+    print(f"[fusion] Running visual analysis on {video_path.name} ...", file=sys.stderr)
     bundle = build_analysis_bundle(video_path)
 
     # Wire in audio analysis
     try:
         from audio.analyze import analyze_audio
-        print(f"[fusion] Running audio analysis on {video_path.name} …", file=sys.stderr)
+        print(f"[fusion] Running audio analysis on {video_path.name} ...", file=sys.stderr)
         audio_windows, _ = analyze_audio(video_path=video_path)
         bundle.audio_windows = audio_windows
         print(f"[fusion] Got {len(audio_windows)} audio windows.", file=sys.stderr)
@@ -94,13 +97,64 @@ def _run_fusion_live(video_path: Path) -> list[Segment]:
     # Wire in speech recognition if the module is available
     try:
         from Automatic_speech_recognition.segment_text_analyzer import build_speech_spans
-        print(f"[fusion] Running speech recognition on {video_path.name} …", file=sys.stderr)
-        bundle.speech_spans = build_speech_spans(video_path)
+        print(f"[fusion] Running speech recognition on {video_path.name} ...", file=sys.stderr)
+        bundle.speech_spans = build_speech_spans(video_path, vad=True)
         print(f"[fusion] Got {len(bundle.speech_spans)} speech spans.", file=sys.stderr)
     except Exception as e:
         print(f"[fusion] Speech recognition unavailable, skipping: {e}", file=sys.stderr)
 
-    print(f"[fusion] Fusing {len(bundle.visual.windows)} windows …", file=sys.stderr)
+    # Optional OCR: sample only visually suspicious windows, so it adds text
+    # evidence for silent/product ads without scanning every frame.
+    try:
+        from ocr.analyze import build_ocr_spans
+
+        ocr_candidate_times = [
+            0.5 * (window.t0 + window.t1)
+            for window in bundle.visual.windows
+            if (
+                window.high_text_density
+                or window.visual_hypothesis in {"graphics_heavy", "static"}
+                or window.palette_delta > 0.35
+            )
+        ]
+        text_device = "cuda" if USE_CUDA_FOR_TEXT_MODELS else "cpu"
+        print(f"[fusion] Running OCR on {video_path.name} ({text_device}) ...", file=sys.stderr)
+        ocr_spans = build_ocr_spans(
+            video_path,
+            candidate_times=ocr_candidate_times,
+            sample_every_sec=10.0,
+            max_frames=260,
+            gpu=USE_CUDA_FOR_TEXT_MODELS,
+        )
+        bundle.speech_spans.extend(ocr_spans)
+        print(f"[fusion] Got {len(ocr_spans)} OCR text spans.", file=sys.stderr)
+    except Exception as e:
+        print(f"[fusion] OCR unavailable, skipping: {e}", file=sys.stderr)
+
+    # Optional semantic text scoring: merge short ASR/OCR spans into longer
+    # context windows, then add ad and structure scores for fusion to consume.
+    try:
+        from semantic.analyze import build_semantic_ad_spans, build_semantic_structure_spans
+
+        text_device = "cuda" if USE_CUDA_FOR_TEXT_MODELS else "cpu"
+        print(f"[fusion] Running semantic ad scoring on {len(bundle.speech_spans)} text spans ({text_device}) ...", file=sys.stderr)
+        semantic_spans = build_semantic_ad_spans(
+            bundle.speech_spans,
+            device="cuda" if USE_CUDA_FOR_TEXT_MODELS else "cpu",
+        )
+        bundle.speech_spans.extend(semantic_spans)
+        print(f"[fusion] Got {len(semantic_spans)} semantic ad spans.", file=sys.stderr)
+        print(f"[fusion] Running semantic structure scoring on {len(bundle.speech_spans)} text spans ({text_device}) ...", file=sys.stderr)
+        structure_spans = build_semantic_structure_spans(
+            bundle.speech_spans,
+            device="cuda" if USE_CUDA_FOR_TEXT_MODELS else "cpu",
+        )
+        bundle.speech_spans.extend(structure_spans)
+        print(f"[fusion] Got {len(structure_spans)} semantic structure spans.", file=sys.stderr)
+    except Exception as e:
+        print(f"[fusion] Semantic text scoring unavailable, skipping: {e}", file=sys.stderr)
+
+    print(f"[fusion] Fusing {len(bundle.visual.windows)} windows ...", file=sys.stderr)
     raw_segments = fuse_bundle_to_segments(bundle)
 
     # Persist for next time

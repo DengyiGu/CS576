@@ -2,7 +2,9 @@
 
 Usage
 -----
-Run from the repo root with PYTHONPATH set so the local packages are importable::
+Run from the repo root with PYTHONPATH set so the local packages are importable.
+
+Exact command (run from repository root):
 
     PYTHONPATH=. python scripts/run_pipeline.py videos_with_ad/test_001.mp4
 
@@ -17,6 +19,8 @@ automatically (player_fusion.py looks them up in ``data/output/``).
 
 Common options
 --------------
+    --skip-analysis        Reuse the existing <stem>_analysis_bundle.json in
+                                                 data/output/ and only run fusion.
   --skip-speech          Skip Whisper transcription (faster; reduces accuracy).
   --skip-audio           Skip the audio modality entirely.
   --model MODEL          Whisper model size (default: small).
@@ -52,6 +56,32 @@ def _run_visual(video: Path, bundle_out: Path, sample_fps: float, window_sec: fl
     bundle = build_analysis_bundle(video, track=track)
     write_analysis_bundle_json(bundle, bundle_out)
     print(f"     Wrote bundle -> {bundle_out}")
+
+def _run_ocr(video: Path, bundle_path: Path) -> None:
+    from ocr.analyze import build_ocr_spans
+    from schemas.modality import AnalysisBundle
+
+    bundle = AnalysisBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
+
+    print("     Running OCR (this can be slow)...")
+    ocr_spans = build_ocr_spans(
+        video,
+        sample_every_sec=3.0,
+        span_sec=4.0,
+        min_confidence=0.35,
+        allow_download=False,  # set to False after first run to avoid re-downloading models
+        # gpu=True,          # uncomment if you have GPU + CUDA
+    )
+
+    # Merge OCR spans with existing speech spans
+    if not hasattr(bundle, 'speech_spans') or bundle.speech_spans is None:
+        bundle.speech_spans = []
+    
+    bundle.speech_spans.extend(ocr_spans)
+    print(f"     OCR: added {len(ocr_spans)} text spans")
+
+    bundle_path.write_text(bundle.model_dump_json(indent=2), encoding="utf-8")
+    print(f"     Updated bundle with OCR -> {bundle_path}")
 
 
 def _run_audio(
@@ -105,6 +135,12 @@ def _run_fusion(bundle_path: Path, segments_out: Path, min_segment_sec: float) -
             )
 
 
+def _bundle_and_segments_paths(video: Path, out_dir: Path) -> tuple[Path, Path]:
+    bundle_path = out_dir / f"{video.stem}_analysis_bundle.json"
+    segments_path = out_dir / f"{video.stem}_segments.json"
+    return bundle_path, segments_path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python scripts/run_pipeline.py",
@@ -122,6 +158,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Process all video files in a directory instead of a single file.",
     )
     parser.add_argument("--out-dir", type=Path, default=Path("data/output"))
+    parser.add_argument("--skip-analysis", action="store_true")
+    parser.add_argument(
+        "--force-analysis",
+        action="store_true",
+        help=(
+            "Force re-running visual/audio analysis even if an existing "
+            "analysis bundle is present in the output directory."
+        ),
+    )
     parser.add_argument("--skip-speech", action="store_true")
     parser.add_argument("--skip-audio", action="store_true")
     parser.add_argument("--model", default="small")

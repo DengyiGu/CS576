@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 import json
+import re
+import numpy as np
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -94,24 +96,24 @@ def _audio_delta(
         return 0.0
     return abs(np.mean(after_vals) - np.mean(before_vals))
 
+    phrases = data.get("phrases", {}).get("sponsorship", [])
+    return brands, phrases
 
-def _speech_coverage(t0: float, t1: float, speech_spans: list[SpeechSpan]) -> float:
-    dur = max(t1 - t0, 1e-6)
-    covered = 0.0
+
+_AD_BRANDS, _AD_PHRASES = _load_ad_signals()
+
+
+def _has_ad_text(t0: float, t1: float, speech_spans: list[SpeechSpan]) -> float:
+    """Return boost if commercial text found"""
+    lo, hi = t0 - 8, t1 + 8
+    chunks = []
     for span in speech_spans:
-        ov_s = max(t0, span.t0)
-        ov_e = min(t1, span.t1)
-        if ov_e > ov_s:
-            covered += ov_e - ov_s
-    return min(1.0, covered / dur)
-
-
-def _has_nearby_speech(
-    t0: float, t1: float, speech_spans: list[SpeechSpan], context: float
-) -> bool:
-    lo, hi = t0 - context, t1 + context
-    return any(s.t1 >= lo and s.t0 <= hi for s in speech_spans)
-
+        if span.t1 < lo or span.t0 > hi or not span.text:
+            continue
+        extra = getattr(span, 'model_extra', {}) or {}
+        if extra.get("source") in {"semantic", "semantic_structure"}:
+            continue
+        chunks.append(span.text.lower())
 
 def _speech_text_ad_signal(
     t0: float, t1: float, speech_spans: list[SpeechSpan]
@@ -123,6 +125,7 @@ def _speech_text_ad_signal(
     ]
     if not chunks:
         return 0.0
+
     combined = " ".join(chunks)
 
     for phrase in _SPONSORSHIP_PHRASES:
@@ -372,6 +375,16 @@ def _make_segment_dict(label: str, start: float, end: float) -> dict[str, Any]:
         "kind": _KIND_FOR_LABEL.get(label, KIND_NON_CONTENT),
     }
 
+    # AUDIO
+    anomaly = 0.0
+    energy = 1.0
+    audio_label = "unknown"
+    if audio_windows:
+        best = min(audio_windows, key=lambda aw: abs(0.5*(aw.t0 + aw.t1) - t_mid))
+        extra = getattr(best, 'model_extra', {}) or {}
+        anomaly = float(extra.get("anomaly_score", 0.0))
+        energy = float(extra.get("energy_rms", 1.0))
+        audio_label = str(extra.get("audio_label", "unknown"))
 
 def _label_content_run(
     windows: list[VisualWindow],
@@ -389,6 +402,7 @@ def _label_content_run(
         return LABEL_OUTRO, intro_used, True
     return LABEL_CORE_CONTENT, intro_used, outro_used
 
+    return float(np.clip(total_score, 0.0, 1.0))
 
 def _build_segments_from_ad_intervals(
     ad_intervals: list[tuple[int, int]],
@@ -435,9 +449,14 @@ def _build_segments_from_ad_intervals(
         segments.append(_make_segment_dict(label, run_start, run_end))
         i = j
 
-    segments.sort(key=lambda s: s["start"])
-    return segments
+    for i, seg in enumerate(merged):
+        dur = seg["end"] - seg["start"]
+        start, end = seg["start"], seg["end"]
 
+        if not intro_done and start < 180 and dur < 200 and i <= 4:
+            final.append({"start": round(start, 3), "end": round(end, 3), "label": LABEL_INTRO, "kind": "non-content"})
+            intro_done = True
+            continue
 
 def _smooth_labels(
     labels: list[str],
@@ -489,6 +508,8 @@ def fuse_bundle_to_segments(
         return []
     windows = bundle.visual.windows
     duration = bundle.visual.duration_sec or bundle.duration_sec
+    audio_windows = getattr(bundle, 'audio_windows', []) or []
+    speech_spans = getattr(bundle, 'speech_spans', []) or []
 
     raw_foreign = _compute_foreignness_scores(
         windows, bundle.audio_windows, bundle.speech_spans, duration
