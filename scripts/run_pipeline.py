@@ -89,6 +89,81 @@ def _run_audio(
     print(f"     Updated bundle -> {bundle_path}")
 
 
+def _run_ocr(video: Path, bundle_path: Path, *, gpu: bool = False) -> None:
+    """Optional: extract on-screen text from visually suspicious windows.
+
+    OCR spans are appended to ``bundle.speech_spans`` with ``source="ocr"`` so
+    the existing brand-name / phrase matching in fusion picks them up.
+    """
+    try:
+        from ocr.analyze import build_ocr_spans
+    except Exception as exc:
+        print(f"     OCR: skipped ({exc}) — install with `pip install -r requirements-ocr.txt`")
+        return
+
+    from schemas.modality import AnalysisBundle
+
+    bundle = AnalysisBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
+    candidate_times: list[float] = []
+    if bundle.visual is not None:
+        for window in bundle.visual.windows:
+            if (
+                window.high_text_density
+                or window.visual_hypothesis in {"graphics_heavy", "static"}
+                or window.palette_delta > 0.35
+            ):
+                candidate_times.append(0.5 * (window.t0 + window.t1))
+
+    try:
+        ocr_spans = build_ocr_spans(
+            video,
+            candidate_times=candidate_times if candidate_times else None,
+            sample_every_sec=10.0,
+            max_frames=260,
+            gpu=gpu,
+        )
+    except Exception as exc:
+        print(f"     OCR: failed during analysis ({exc})")
+        return
+
+    bundle.speech_spans = list(bundle.speech_spans) + list(ocr_spans)
+    bundle_path.write_text(bundle.model_dump_json(indent=2), encoding="utf-8")
+    print(f"     OCR: {len(ocr_spans)} text spans (candidate windows={len(candidate_times)})")
+
+
+def _run_semantic(bundle_path: Path, *, device: str = "cpu") -> None:
+    """Optional: score ASR/OCR text spans for ad / intro / outro semantics.
+
+    Adds ``source="semantic"`` and ``source="semantic_structure"`` SpeechSpans
+    onto the bundle.  These extra fields are visible to fusion but only fully
+    utilised once ``fusion/fuse.py`` is updated to consume them.
+    """
+    try:
+        from semantic.analyze import build_semantic_ad_spans, build_semantic_structure_spans
+    except Exception as exc:
+        print(f"     Semantic: skipped ({exc}) — install with `pip install -r requirements-semantic.txt`")
+        return
+
+    from schemas.modality import AnalysisBundle
+
+    bundle = AnalysisBundle.model_validate_json(bundle_path.read_text(encoding="utf-8"))
+    if not bundle.speech_spans:
+        print("     Semantic: skipped (no ASR/OCR text spans to score)")
+        return
+
+    try:
+        ad_spans = build_semantic_ad_spans(bundle.speech_spans, device=device)
+        bundle.speech_spans = list(bundle.speech_spans) + list(ad_spans)
+        struct_spans = build_semantic_structure_spans(bundle.speech_spans, device=device)
+        bundle.speech_spans = list(bundle.speech_spans) + list(struct_spans)
+    except Exception as exc:
+        print(f"     Semantic: failed during analysis ({exc})")
+        return
+
+    bundle_path.write_text(bundle.model_dump_json(indent=2), encoding="utf-8")
+    print(f"     Semantic: ad={len(ad_spans)} structure={len(struct_spans)} new spans")
+
+
 def _run_fusion(bundle_path: Path, segments_out: Path, min_segment_sec: float) -> None:
     from fusion.fuse import fuse_bundle_to_segments, load_bundle, write_segments_json
 
@@ -136,6 +211,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip visual analysis and use existing analysis bundle in the output dir.",
     )
+    parser.add_argument(
+        "--with-ocr",
+        action="store_true",
+        help="Run on-frame OCR on visually suspicious windows (slow; needs `pip install -r requirements-ocr.txt`).",
+    )
+    parser.add_argument(
+        "--with-semantic",
+        action="store_true",
+        help="Score ASR/OCR text with semantic ad/intro/outro embeddings (needs `pip install -r requirements-semantic.txt`).",
+    )
+    parser.add_argument(
+        "--text-device",
+        default="cpu",
+        choices=("cpu", "cuda"),
+        help="Device for OCR + semantic models when those flags are enabled.",
+    )
     args = parser.parse_args(argv)
 
     def _process_single(video_path: Path) -> int:
@@ -153,7 +244,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  Bundle  -> {bundle_path}")
         print(f"  Segments-> {segments_path}")
 
-        total_steps = (0 if args.skip_analysis else 1) + (0 if args.skip_audio else 1) + 1
+        total_steps = (
+            (0 if args.skip_analysis else 1)
+            + (0 if args.skip_audio else 1)
+            + (1 if args.with_ocr else 0)
+            + (1 if args.with_semantic else 0)
+            + 1
+        )
         step = 0
 
         if not args.skip_analysis:
@@ -187,6 +284,20 @@ def main(argv: list[str] | None = None) -> int:
                 vad=args.vad,
                 language=args.language,
             )
+            print(f"     Took {time.monotonic() - t0:.1f}s")
+
+        if args.with_ocr:
+            step += 1
+            t0 = time.monotonic()
+            _print_step(step, total_steps, f"OCR ({args.text_device})")
+            _run_ocr(video, bundle_path, gpu=(args.text_device == "cuda"))
+            print(f"     Took {time.monotonic() - t0:.1f}s")
+
+        if args.with_semantic:
+            step += 1
+            t0 = time.monotonic()
+            _print_step(step, total_steps, f"Semantic text scoring ({args.text_device})")
+            _run_semantic(bundle_path, device=args.text_device)
             print(f"     Took {time.monotonic() - t0:.1f}s")
 
         step += 1
