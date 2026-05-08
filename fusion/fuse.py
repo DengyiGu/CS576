@@ -1,36 +1,4 @@
-﻿"""
-Multimodal fusion layer 鈥?edge-based ad detection with variable ad count.
-
-Strategy (redesigned)
----------------------
-Ads create TWO hard cuts:
-  content 鈫?ad  : abrupt palette shift, audio change, often speech stops
-  ad 鈫?content  : abrupt palette shift, audio change, often speech resumes
-
-Rather than maximising a foreignness score over an interval (which inflates
-interval sizes), we:
-
-1. Compute a per-window "edge strength" at each boundary between consecutive
-   windows: palette_delta already measures this.  We combine it with an audio-
-   change signal and a speech-gap signal to form a "cut score".
-
-2. Find all candidate cut points above a threshold 鈥?these are potential
-   ad start/end boundaries.
-
-3. Score candidate cut pairs and keep high-confidence, non-overlapping
-   advertisement intervals:
-       score(s,e) = edge_strength(s) + edge_strength(e)
-                   + foreignness_bonus(s, e)   # content inside is "foreign"
-   subject to:
-       AD_MIN_SEC 鈮?e鈭抯 鈮?AD_MAX_SEC
-       candidate confidence threshold
-       duplicate/overlap suppression
-
-4. Assign non-ad labels conservatively: Core Content by default, then at most
-   one Intro/Outro on non-ad edge regions if explicit structure signals exist.
-"""
-
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -98,6 +66,8 @@ INTERIOR_WEIGHT   = 1.5
 TEXT_WEIGHT       = 1.0
 CONTENT_PENALTY_WEIGHT = 3.0
 SEMANTIC_AD_THRESHOLD = 0.78
+SEMANTIC_WEAK_AD_THRESHOLD = 0.72
+SEMANTIC_WEAK_AD_MARGIN = 0.10
 DIRECTION_WEIGHT = 2.0
 DIRECTION_CONTEXT_SEC = 45.0
 CANDIDATE_MIN_ADNESS = 0.10
@@ -159,7 +129,7 @@ def _load_ad_signals() -> tuple[list[str], list[str], dict[str, list[str]]]:
             extra_brand_names.append(name)
 
     extra_brand_file = fusion_dir / "extra_brand_names.txt"
-    if os.getenv("FUSION_USE_EXTRA_BRANDS") == "1" and extra_brand_file.is_file():
+    if os.getenv("FUSION_USE_EXTRA_BRANDS", "1") != "0" and extra_brand_file.is_file():
         for line in extra_brand_file.read_text(encoding="utf-8").splitlines():
             for name in line.split("#", 1)[0].split(","):
                 add_extra_brand(name)
@@ -433,12 +403,14 @@ def _speech_text_ad_signal(
     chunks: list[str] = []
     ocr_chunks: list[str] = []
     semantic_score = 0.0
+    semantic_margin = 0.0
     for span in speech_spans:
         if span.t1 < lo or span.t0 > hi:
             continue
         extra = span.model_extra or {}
         source = extra.get("source")
         semantic_score = max(semantic_score, float(extra.get("semantic_ad_score", 0.0)))
+        semantic_margin = max(semantic_margin, float(extra.get("semantic_margin", 0.0)))
         if source in {"semantic", "semantic_structure"}:
             continue
         if span.text:
@@ -447,8 +419,20 @@ def _speech_text_ad_signal(
             if source == "ocr":
                 ocr_chunks.append(text)
 
+    def semantic_ad_signal() -> float:
+        if semantic_score >= SEMANTIC_AD_THRESHOLD:
+            return semantic_score
+        asr_cov = _asr_speech_coverage(t0, t1, speech_spans)
+        if (
+            semantic_score >= SEMANTIC_WEAK_AD_THRESHOLD
+            and semantic_margin >= SEMANTIC_WEAK_AD_MARGIN
+            and asr_cov >= 0.25
+        ):
+            return 0.35
+        return 0.0
+
     if not chunks:
-        return semantic_score if semantic_score >= SEMANTIC_AD_THRESHOLD else 0.0
+        return semantic_ad_signal()
     combined = " ".join(chunks)
     for phrase in _SPONSORSHIP_PHRASES:
         if phrase in combined:
@@ -462,7 +446,7 @@ def _speech_text_ad_signal(
         return 0.35
     if brand_hits == 1:
         return 0.22
-    return semantic_score if semantic_score >= SEMANTIC_AD_THRESHOLD else 0.0
+    return semantic_ad_signal()
 
 
 def _content_text_penalty(
