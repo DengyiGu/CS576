@@ -228,5 +228,12 @@ __marimo__/
 /videos_with_ad/*.mov
 /videos_with_ad/*.mkv
 
-# Local ASR models are downloaded during setup and should not be committed
+# Local ASR / OCR / semantic / audio model weights are downloaded during
+# setup and must not be committed (large binaries, license-bound).
 /Automatic_speech_recognition/models/
+/audio/models/
+/ocr/models/
+/semantic/models/
+
+# Course-supplied project specification (kept locally, not in repo)
+/Project_Spring2026.pdf
